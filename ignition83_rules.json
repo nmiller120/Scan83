@@ -1,0 +1,100 @@
+[
+  {
+    "rule_id": "IGN83-DEP-001",
+    "severity": "YELLOW",
+    "pattern": "\\bsystem\\.dataset\\.toPyDataSet\\s*\\(",
+    "message": "system.dataset.toPyDataSet() is deprecated in Ignition 8.3.",
+    "recommendation": "Review usage. Dataset objects are directly iterable/indexable in 8.3, but existing calls may remain compatible."
+  },
+  {
+    "rule_id": "IGN83-DATASET-001",
+    "severity": "ORANGE",
+    "pattern": "\\bsystem\\.dataset\\.toDataSet\\s*\\(",
+    "message": "Legacy dataset constructor spelling detected.",
+    "recommendation": "Review and test this call in 8.3.8. The current API uses system.dataset.toDataset()."
+  },
+  {
+    "rule_id": "IGN83-ALARM-001",
+    "severity": "ORANGE",
+    "pattern": "\\bsystem\\.alarm\\.queryStatus\\s*\\(",
+    "message": "system.alarm.queryStatus() usage detected.",
+    "recommendation": "Inspect how the return value is consumed. In affected 8.3 versions, return-object behavior has caused compatibility issues, especially code calling .getDataset()."
+  },
+  {
+    "rule_id": "IGN83-DB-001",
+    "severity": "ORANGE",
+    "pattern": "\\bsystem\\.db\\.runNamedQuery\\s*\\([^;\\n]*,\\s*None\\s*\\)",
+    "message": "runNamedQuery() appears to be called with None parameters.",
+    "recommendation": "Review for 8.3.8 compatibility. Prefer {} when no parameters are required."
+  },
+  {
+    "rule_id": "IGN83-DB-002",
+    "severity": "YELLOW",
+    "pattern": "\\bsystem\\.db\\.(runQuery|runScalarQuery|runUpdateQuery|runNamedQuery)\\s*\\(",
+    "message": "Deprecated system.db.run* API detected.",
+    "recommendation": "Generally leave unchanged unless testing reveals a problem. Record as deprecated-but-supported."
+  },
+  {
+    "rule_id": "IGN83-HIST-001",
+    "severity": "ORANGE",
+    "pattern": "\\bsystem\\.tag\\.(queryTagHistory|queryTagCalculations|queryTagDensity)\\s*\\(",
+    "message": "Deprecated legacy historian API detected.",
+    "recommendation": "Explicitly regression-test the affected historian workflow against Ignition 8.3.8."
+  },
+  {
+    "rule_id": "IGN83-HIST-002",
+    "severity": "YELLOW",
+    "pattern": "\\bsystem\\.tag\\.(browseHistoricalTags|queryAnnotations)\\s*\\(",
+    "message": "Deprecated historian-related system.tag API detected.",
+    "recommendation": "Document and test, but avoid changing solely because it is deprecated."
+  },
+  {
+    "rule_id": "IGN83-HIST-003",
+    "severity": "ORANGE",
+    "pattern": "\\bsystem\\.tag\\.(storeTagHistory|storeAnnotations|deleteAnnotations)\\s*\\(",
+    "message": "Deprecated historian write API detected.",
+    "recommendation": "Explicitly test because this code writes or deletes historian data."
+  },
+  {
+    "rule_id": "IGN83-DATASET-002",
+    "severity": "ORANGE",
+    "pattern": "\\bsystem\\.dataset\\.(toExcel|exportExcel)\\s*\\(",
+    "message": "Excel export using Dataset API detected.",
+    "recommendation": "Review arguments carefully. Ignition 8.3.8 has known Dataset sequence/coercion regressions in this area."
+  },
+  {
+    "rule_id": "IGN83-TAG-001",
+    "severity": "ORANGE",
+    "pattern": "\\bsystem\\.tag\\.(writeBlocking|writeAsync)\\s*\\(",
+    "message": "Tag write API detected.",
+    "recommendation": "If a Dataset is passed directly as the value/list argument, explicitly test this in 8.3.8."
+  },
+  {
+    "rule_id": "IGN83-TAG-002",
+    "severity": "YELLOW",
+    "pattern": "\\bsystem\\.tag\\.browse\\s*\\(",
+    "message": "system.tag.browse() usage detected.",
+    "recommendation": "If relative tag paths such as [.] or [~] are used, explicitly test behavior in 8.3.8."
+  },
+  {
+    "rule_id": "IGN83-TYPE-001",
+    "severity": "ORANGE",
+    "pattern": "\\bPyDataSet\\b|\\bPyDataset\\b|DatasetUtilities\\.PyDataSet",
+    "message": "Explicit PyDataset type reference detected.",
+    "recommendation": "Review type checks/imports. Dataset wrapping behavior changed in 8.3."
+  },
+  {
+    "rule_id": "IGN83-TYPE-002",
+    "severity": "YELLOW",
+    "pattern": "\\bisinstance\\s*\\(|\\btype\\s*\\(",
+    "message": "Explicit Python type inspection detected.",
+    "recommendation": "Review if this code checks Dataset/PyDataset, QualifiedValue, AlarmQueryResult, or other Ignition scripting-object types."
+  },
+  {
+    "rule_id": "IGN83-EXPR-001",
+    "severity": "ORANGE",
+    "pattern": "\\bforceQuality\\s*\\(",
+    "message": "Deprecated forceQuality() expression usage detected.",
+    "recommendation": "Review and migrate to qualifiedValue() if this expression is part of a critical binding."
+  }
+]
