@@ -3,29 +3,33 @@
 """
 Ignition 8.1 -> 8.3.8 Compatibility Scanner
 
-Simple regex rules are loaded from a JSON file.
+Features:
+- Recursively scans an Ignition projects directory
+- Loads simple regex rules from CSV
+- Skips Ignition's .resources folder and common dev/build folders
+- Tracks project name from the first directory below the scan root
+- Writes detailed findings CSV
+- Writes rule summary CSV with occurrence/project counts
+- Includes a small number of context-aware checks that are still implemented in Python
 
 Usage:
 
-    python ignition83_scan.py C:\\path\\to\\projects
+    python ignition83_scan.py "C:\\Program Files\\Inductive Automation\\Ignition\\data\\projects"
 
-    python ignition83_scan.py C:\\path\\to\\projects \
-        --rules ignition83_rules.json
-
-    python ignition83_scan.py C:\\path\\to\\projects \
-        --rules ignition83_rules.json \
-        --csv findings.csv
+    python ignition83_scan.py "C:\\Program Files\\Inductive Automation\\Ignition\\data\\projects" \
+        --rules ignition83_rules.csv \
+        --findings reports\\findings.csv \
+        --summary reports\\rule_summary.csv
 """
 
 import argparse
 import csv
-import json
 import os
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Set
 
 
 # ============================================================
@@ -48,14 +52,23 @@ class Finding:
 class Rule:
     rule_id: str
     severity: str
+    category: str
     pattern: str
-    message: str
+    description: str
+    reason: str
     recommendation: str
+    test_procedure: str
+    affected_versions: str
+    fixed_version: str
+    reference: str
+    status: str
+    notes: str
+    enabled: bool = True
     flags: int = 0
 
 
 # ============================================================
-# SCANNER CONFIG
+# CONFIG
 # ============================================================
 
 SKIP_DIRS = {
@@ -71,7 +84,6 @@ SKIP_DIRS = {
     ".pytest_cache",
     ".mypy_cache",
 }
-
 
 TEXT_EXTENSIONS = {
     ".py",
@@ -89,7 +101,6 @@ TEXT_EXTENSIONS = {
     ".jsx",
 }
 
-
 SEVERITY_ORDER = {
     "RED": 0,
     "ORANGE": 1,
@@ -97,121 +108,123 @@ SEVERITY_ORDER = {
     "GREEN": 3,
 }
 
+REQUIRED_RULE_FIELDS = {
+    "rule_id",
+    "severity",
+    "category",
+    "pattern",
+    "description",
+    "reason",
+    "recommendation",
+    "test_procedure",
+    "affected_versions",
+    "fixed_version",
+    "reference",
+    "status",
+    "notes",
+}
+
 
 # ============================================================
 # RULE LOADING
 # ============================================================
 
-def load_rules(path: Path) -> List[Rule]:
+def parse_bool(value: str) -> bool:
+    if value is None or value == "":
+        return True
 
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            raw_rules = json.load(f)
-
-    except FileNotFoundError:
-        print(
-            f"Rules file not found: {path}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    except json.JSONDecodeError as e:
-        print(
-            f"Invalid JSON in rules file: {e}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    if not isinstance(raw_rules, list):
-        print(
-            "Rules file must contain a JSON array.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    rules = []
-
-    required_fields = {
-        "rule_id",
-        "severity",
-        "pattern",
-        "message",
-        "recommendation",
+    return value.strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "n",
+        "disabled",
+        "off",
     }
 
-    seen_ids = set()
 
-    for index, raw in enumerate(raw_rules, start=1):
+def load_rules(path: Path) -> List[Rule]:
+    try:
+        with path.open("r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
 
-        if not isinstance(raw, dict):
-            print(
-                f"Rule #{index} must be a JSON object.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            if reader.fieldnames is None:
+                raise ValueError("Rules CSV does not contain a header row.")
 
-        missing = required_fields - raw.keys()
+            missing = REQUIRED_RULE_FIELDS - set(reader.fieldnames)
 
-        if missing:
-            print(
-                f"Rule #{index} is missing fields: "
-                f"{', '.join(sorted(missing))}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            if missing:
+                raise ValueError(
+                    "Rules CSV is missing required columns: "
+                    + ", ".join(sorted(missing))
+                )
 
-        rule_id = raw["rule_id"]
+            rules = []
+            seen_ids = set()
 
-        if rule_id in seen_ids:
-            print(
-                f"Duplicate rule_id: {rule_id}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            for row_number, row in enumerate(reader, start=2):
+                rule_id = (row.get("rule_id") or "").strip()
 
-        seen_ids.add(rule_id)
+                if not rule_id:
+                    raise ValueError(
+                        f"Rules CSV row {row_number} has no rule_id."
+                    )
 
-        severity = raw["severity"].upper()
+                if rule_id in seen_ids:
+                    raise ValueError(
+                        f"Duplicate rule_id '{rule_id}' on row {row_number}."
+                    )
 
-        if severity not in SEVERITY_ORDER:
-            print(
-                f"Invalid severity '{severity}' "
-                f"in rule {rule_id}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+                seen_ids.add(rule_id)
 
-        pattern = raw["pattern"]
+                severity = (row.get("severity") or "").strip().upper()
 
-        # Validate regex now instead of failing during the scan.
-        try:
-            re.compile(pattern)
-        except re.error as e:
-            print(
-                f"Invalid regex in rule {rule_id}: {e}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+                if severity not in SEVERITY_ORDER:
+                    raise ValueError(
+                        f"Invalid severity '{severity}' "
+                        f"for rule {rule_id} on row {row_number}."
+                    )
 
-        rules.append(
-            Rule(
-                rule_id=rule_id,
-                severity=severity,
-                pattern=pattern,
-                message=raw["message"],
-                recommendation=raw["recommendation"],
-            )
-        )
+                pattern = row.get("pattern") or ""
 
-    return rules
+                try:
+                    re.compile(pattern)
+                except re.error as e:
+                    raise ValueError(
+                        f"Invalid regex for rule {rule_id} "
+                        f"on row {row_number}: {e}"
+                    )
+
+                rules.append(
+                    Rule(
+                        rule_id=rule_id,
+                        severity=severity,
+                        category=(row.get("category") or "").strip(),
+                        pattern=pattern,
+                        description=(row.get("description") or "").strip(),
+                        reason=(row.get("reason") or "").strip(),
+                        recommendation=(row.get("recommendation") or "").strip(),
+                        test_procedure=(row.get("test_procedure") or "").strip(),
+                        affected_versions=(row.get("affected_versions") or "").strip(),
+                        fixed_version=(row.get("fixed_version") or "").strip(),
+                        reference=(row.get("reference") or "").strip(),
+                        status=(row.get("status") or "").strip(),
+                        notes=(row.get("notes") or "").strip(),
+                        enabled=parse_bool(row.get("enabled", "true")),
+                    )
+                )
+
+            return rules
+
+    except FileNotFoundError:
+        raise ValueError(f"Rules file not found: {path}")
 
 
 # ============================================================
-# HELPERS
+# FILE HELPERS
 # ============================================================
 
 def looks_binary(path: Path) -> bool:
-
     try:
         with path.open("rb") as f:
             chunk = f.read(4096)
@@ -223,11 +236,9 @@ def looks_binary(path: Path) -> bool:
 
 
 def should_scan(path: Path) -> bool:
-
     if path.suffix.lower() in TEXT_EXTENSIONS:
         return True
 
-    # Some Ignition resources may be extensionless but textual.
     if not path.suffix:
         return not looks_binary(path)
 
@@ -235,7 +246,6 @@ def should_scan(path: Path) -> bool:
 
 
 def read_text(path: Path) -> Optional[str]:
-
     encodings = [
         "utf-8",
         "utf-8-sig",
@@ -244,41 +254,21 @@ def read_text(path: Path) -> Optional[str]:
     ]
 
     for encoding in encodings:
-
         try:
-            return path.read_text(
-                encoding=encoding
-            )
-
+            return path.read_text(encoding=encoding)
         except UnicodeDecodeError:
             continue
-
         except OSError:
             return None
 
     return None
 
 
-def line_number(
-    text: str,
-    position: int,
-) -> int:
-
-    return (
-        text.count(
-            "\n",
-            0,
-            position,
-        )
-        + 1
-    )
+def line_number(text: str, position: int) -> int:
+    return text.count("\n", 0, position) + 1
 
 
-def get_line(
-    text: str,
-    number: int,
-) -> str:
-
+def get_line(text: str, number: int) -> str:
     lines = text.splitlines()
 
     if 1 <= number <= len(lines):
@@ -287,14 +277,9 @@ def get_line(
     return ""
 
 
-def get_project_name(
-    root: Path,
-    path: Path,
-) -> str:
-
+def get_project_name(root: Path, path: Path) -> str:
     try:
         relative = path.relative_to(root)
-
     except ValueError:
         return "(unknown)"
 
@@ -305,7 +290,7 @@ def get_project_name(
 
 
 # ============================================================
-# BASIC RULE SCANNING
+# SIMPLE CSV-BACKED REGEX RULES
 # ============================================================
 
 def scan_regex_rules(
@@ -318,18 +303,13 @@ def scan_regex_rules(
     findings = []
 
     for rule in rules:
+        if not rule.enabled:
+            continue
 
-        regex = re.compile(
-            rule.pattern,
-            rule.flags,
-        )
+        regex = re.compile(rule.pattern, rule.flags)
 
         for match in regex.finditer(text):
-
-            line = line_number(
-                text,
-                match.start(),
-            )
+            line = line_number(text, match.start())
 
             findings.append(
                 Finding(
@@ -338,11 +318,8 @@ def scan_regex_rules(
                     project=project,
                     file=relative_path,
                     line=line,
-                    code=get_line(
-                        text,
-                        line,
-                    ),
-                    message=rule.message,
+                    code=get_line(text, line),
+                    message=rule.description,
                     recommendation=rule.recommendation,
                 )
             )
@@ -352,6 +329,9 @@ def scan_regex_rules(
 
 # ============================================================
 # CONTEXT-AWARE RULES
+#
+# These stay in Python for now because they inspect relationships
+# between lines/variables instead of just matching one regex.
 # ============================================================
 
 def scan_query_status_getdataset(
@@ -361,19 +341,7 @@ def scan_query_status_getdataset(
     search_window_lines: int = 15,
 ) -> List[Finding]:
 
-    """
-    Detect:
-
-        alarms = system.alarm.queryStatus(...)
-        ...
-        alarms.getDataset()
-
-    This is not full data-flow analysis. It simply tracks a direct
-    assignment for a limited number of subsequent lines.
-    """
-
     findings = []
-
     lines = text.splitlines()
 
     assignment_regex = re.compile(
@@ -387,7 +355,6 @@ def scan_query_status_getdataset(
     )
 
     for index, line in enumerate(lines):
-
         match = assignment_regex.search(line)
 
         if not match:
@@ -406,15 +373,8 @@ def scan_query_status_getdataset(
             index + search_window_lines + 1,
         )
 
-        for later_index in range(
-            index + 1,
-            end,
-        ):
-
-            if get_dataset_regex.search(
-                lines[later_index]
-            ):
-
+        for later_index in range(index + 1, end):
+            if get_dataset_regex.search(lines[later_index]):
                 findings.append(
                     Finding(
                         severity="RED",
@@ -422,20 +382,15 @@ def scan_query_status_getdataset(
                         project=project,
                         file=relative_path,
                         line=later_index + 1,
-                        code=lines[
-                            later_index
-                        ].strip(),
+                        code=lines[later_index].strip(),
                         message=(
-                            "Return value from "
-                            "system.alarm.queryStatus() "
-                            "is later used with "
-                            ".getDataset()."
+                            "Return value from system.alarm.queryStatus() "
+                            "is later used with .getDataset()."
                         ),
                         recommendation=(
-                            "Known 8.3 compatibility hazard. "
-                            "If the goal is an alarm count, "
-                            "use len(alarms). Otherwise review "
-                            "the expected return-object behavior."
+                            "Known 8.3.8 compatibility hazard. "
+                            "If the goal is an alarm count, use len(alarms). "
+                            "Otherwise review the expected return-object behavior."
                         ),
                     )
                 )
@@ -448,14 +403,6 @@ def scan_inline_query_status_getdataset(
     relative_path: str,
     project: str,
 ) -> List[Finding]:
-
-    """
-    Detect:
-
-        system.alarm.queryStatus(...).getDataset()
-
-    DOTALL allows multiline calls.
-    """
 
     regex = re.compile(
         r"""
@@ -473,11 +420,7 @@ def scan_inline_query_status_getdataset(
     findings = []
 
     for match in regex.finditer(text):
-
-        line = line_number(
-            text,
-            match.start(),
-        )
+        line = line_number(text, match.start())
 
         findings.append(
             Finding(
@@ -486,19 +429,14 @@ def scan_inline_query_status_getdataset(
                 project=project,
                 file=relative_path,
                 line=line,
-                code=get_line(
-                    text,
-                    line,
-                ),
+                code=get_line(text, line),
                 message=(
-                    "Direct queryStatus(...).getDataset() "
-                    "chain detected."
+                    "Direct queryStatus(...).getDataset() chain detected."
                 ),
                 recommendation=(
-                    "Known 8.3 compatibility hazard. "
-                    "Rewrite based on what the code "
-                    "actually needs; for alarm count "
-                    "use len(result)."
+                    "Known 8.3.8 compatibility hazard. "
+                    "Rewrite based on what the code actually needs; "
+                    "for an alarm count use len(result)."
                 ),
             )
         )
@@ -518,9 +456,6 @@ def scan_repository(
     findings = []
 
     for current_root, dirs, files in os.walk(root):
-
-        # Modify dirs in place so os.walk does not descend
-        # into ignored directories.
         dirs[:] = [
             d
             for d in dirs
@@ -530,7 +465,6 @@ def scan_repository(
         current_path = Path(current_root)
 
         for filename in files:
-
             path = current_path / filename
 
             if not should_scan(path):
@@ -541,14 +475,8 @@ def scan_repository(
             if text is None:
                 continue
 
-            relative_path = str(
-                path.relative_to(root)
-            )
-
-            project = get_project_name(
-                root,
-                path,
-            )
+            relative_path = str(path.relative_to(root))
+            project = get_project_name(root, path)
 
             findings.extend(
                 scan_regex_rules(
@@ -579,20 +507,14 @@ def scan_repository(
 
 
 # ============================================================
-# OUTPUT
+# SORTING / OUTPUT
 # ============================================================
 
-def sort_findings(
-    findings: List[Finding],
-) -> List[Finding]:
-
+def sort_findings(findings: List[Finding]) -> List[Finding]:
     return sorted(
         findings,
         key=lambda f: (
-            SEVERITY_ORDER.get(
-                f.severity,
-                99,
-            ),
+            SEVERITY_ORDER.get(f.severity, 99),
             f.project,
             f.file,
             f.line,
@@ -601,48 +523,28 @@ def sort_findings(
     )
 
 
-def print_findings(
-    findings: List[Finding],
-) -> None:
-
+def print_findings(findings: List[Finding]) -> None:
     if not findings:
         print("No findings.")
         return
 
     for finding in findings:
-
         print()
         print("=" * 80)
-
-        print(
-            f"[{finding.severity}] "
-            f"{finding.rule_id}"
-        )
-
-        print(
-            f"Project: {finding.project}"
-        )
-
-        print(
-            f"{finding.file}:{finding.line}"
-        )
+        print(f"[{finding.severity}] {finding.rule_id}")
+        print(f"Project: {finding.project}")
+        print(f"{finding.file}:{finding.line}")
 
         print()
-        print(
-            f"  {finding.code}"
-        )
+        print(f"  {finding.code}")
 
         print()
         print("Issue:")
-        print(
-            f"  {finding.message}"
-        )
+        print(f"  {finding.message}")
 
         print()
         print("Recommendation:")
-        print(
-            f"  {finding.recommendation}"
-        )
+        print(f"  {finding.recommendation}")
 
     print()
     print("=" * 80)
@@ -651,13 +553,8 @@ def print_findings(
     counts = {}
 
     for finding in findings:
-
         counts[finding.severity] = (
-            counts.get(
-                finding.severity,
-                0,
-            )
-            + 1
+            counts.get(finding.severity, 0) + 1
         )
 
     for severity in [
@@ -666,21 +563,20 @@ def print_findings(
         "YELLOW",
         "GREEN",
     ]:
-
         print(
             f"  {severity:<7}: "
             f"{counts.get(severity, 0)}"
         )
 
-    print(
-        f"  TOTAL  : {len(findings)}"
-    )
+    print(f"  TOTAL  : {len(findings)}")
 
 
-def write_csv(
+def write_findings_csv(
     findings: List[Finding],
     filename: Path,
 ) -> None:
+
+    filename.parent.mkdir(parents=True, exist_ok=True)
 
     with filename.open(
         "w",
@@ -702,7 +598,6 @@ def write_csv(
         ])
 
         for finding in findings:
-
             writer.writerow([
                 finding.severity,
                 finding.rule_id,
@@ -715,12 +610,165 @@ def write_csv(
             ])
 
 
+def write_rule_summary_csv(
+    rules: List[Rule],
+    findings: List[Finding],
+    filename: Path,
+) -> None:
+
+    filename.parent.mkdir(parents=True, exist_ok=True)
+
+    counts: Dict[str, int] = {}
+    projects_by_rule: Dict[str, Set[str]] = {}
+
+    for finding in findings:
+        counts[finding.rule_id] = counts.get(finding.rule_id, 0) + 1
+
+        projects_by_rule.setdefault(
+            finding.rule_id,
+            set(),
+        ).add(finding.project)
+
+    rule_map = {
+        rule.rule_id: rule
+        for rule in rules
+    }
+
+    # Add the context-aware rules so they also appear in the summary,
+    # even though they are not configured in the CSV yet.
+    builtin_rules = [
+        Rule(
+            rule_id="IGN83-ALARM-002",
+            severity="RED",
+            category="Alarm",
+            pattern="",
+            description=(
+                "queryStatus() result assigned to a variable and "
+                "later consumed with .getDataset()."
+            ),
+            reason=(
+                "Known 8.3.8 compatibility hazard involving "
+                "queryStatus return-object behavior."
+            ),
+            recommendation=(
+                "For alarm counts, use len(result). "
+                "Otherwise review the required result behavior."
+            ),
+            test_procedure=(
+                "Exercise each affected alarm binding/script in 8.3.8."
+            ),
+            affected_versions="8.3.8",
+            fixed_version="",
+            reference="",
+            status="Not Reviewed",
+            notes="Built-in context-aware scanner rule.",
+            enabled=True,
+        ),
+        Rule(
+            rule_id="IGN83-ALARM-003",
+            severity="RED",
+            category="Alarm",
+            pattern="",
+            description=(
+                "Direct system.alarm.queryStatus(...).getDataset() chain."
+            ),
+            reason=(
+                "Known 8.3.8 compatibility hazard involving "
+                "queryStatus return-object behavior."
+            ),
+            recommendation=(
+                "For alarm counts, use len(result). "
+                "Otherwise review the required result behavior."
+            ),
+            test_procedure=(
+                "Exercise each affected alarm binding/script in 8.3.8."
+            ),
+            affected_versions="8.3.8",
+            fixed_version="",
+            reference="",
+            status="Not Reviewed",
+            notes="Built-in context-aware scanner rule.",
+            enabled=True,
+        ),
+    ]
+
+    for builtin in builtin_rules:
+        rule_map.setdefault(
+            builtin.rule_id,
+            builtin,
+        )
+
+    ordered_rules = sorted(
+        rule_map.values(),
+        key=lambda r: (
+            SEVERITY_ORDER.get(r.severity, 99),
+            r.category,
+            r.rule_id,
+        ),
+    )
+
+    with filename.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as f:
+
+        writer = csv.writer(f)
+
+        writer.writerow([
+            "Rule ID",
+            "Severity",
+            "Category",
+            "Enabled",
+            "Occurrences",
+            "Projects Affected",
+            "Project Count",
+            "Description",
+            "Reason",
+            "Recommendation",
+            "Test Procedure",
+            "Affected Versions",
+            "Fixed Version",
+            "Reference",
+            "Status",
+            "Notes",
+            "Pattern",
+        ])
+
+        for rule in ordered_rules:
+            projects = sorted(
+                projects_by_rule.get(
+                    rule.rule_id,
+                    set(),
+                )
+            )
+
+            writer.writerow([
+                rule.rule_id,
+                rule.severity,
+                rule.category,
+                "Yes" if rule.enabled else "No",
+                counts.get(rule.rule_id, 0),
+                "; ".join(projects),
+                len(projects),
+                rule.description,
+                rule.reason,
+                rule.recommendation,
+                rule.test_procedure,
+                rule.affected_versions,
+                rule.fixed_version,
+                rule.reference,
+                rule.status,
+                rule.notes,
+                rule.pattern,
+            ])
+
+
 # ============================================================
 # ENTRY POINT
 # ============================================================
 
 def main():
-
     parser = argparse.ArgumentParser(
         description=(
             "Scan Ignition projects for "
@@ -730,59 +778,68 @@ def main():
 
     parser.add_argument(
         "root",
-        help=(
-            "Root directory containing "
-            "Ignition projects"
-        ),
+        help="Root directory containing Ignition projects",
     )
 
     parser.add_argument(
         "--rules",
-        default="ignition83_rules.json",
+        default="ignition83_rules.csv",
         help=(
-            "JSON rules file "
-            "(default: ignition83_rules.json)"
+            "CSV rules file "
+            "(default: ignition83_rules.csv)"
         ),
     )
 
     parser.add_argument(
-        "--csv",
-        help="Optional CSV output filename",
+        "--findings",
+        default="reports/findings.csv",
+        help=(
+            "Detailed findings CSV "
+            "(default: reports/findings.csv)"
+        ),
+    )
+
+    parser.add_argument(
+        "--summary",
+        default="reports/rule_summary.csv",
+        help=(
+            "Rule summary CSV "
+            "(default: reports/rule_summary.csv)"
+        ),
     )
 
     args = parser.parse_args()
 
-    root = Path(
-        args.root
-    ).resolve()
-
-    rules_path = Path(
-        args.rules
-    ).resolve()
+    root = Path(args.root).resolve()
+    rules_path = Path(args.rules).resolve()
+    findings_path = Path(args.findings).resolve()
+    summary_path = Path(args.summary).resolve()
 
     if not root.exists():
-
         print(
             f"Path does not exist: {root}",
             file=sys.stderr,
         )
-
         sys.exit(1)
 
-    rules = load_rules(
-        rules_path
+    try:
+        rules = load_rules(rules_path)
+    except ValueError as e:
+        print(
+            f"Rules error: {e}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    enabled_count = sum(
+        1 for rule in rules if rule.enabled
     )
 
+    print(f"Scanning: {root}")
+    print(f"Rules:    {rules_path}")
     print(
-        f"Scanning: {root}"
-    )
-
-    print(
-        f"Rules:    {rules_path}"
-    )
-
-    print(
-        f"Loaded:   {len(rules)} rules"
+        f"Loaded:   {len(rules)} rules "
+        f"({enabled_count} enabled)"
     )
 
     findings = scan_repository(
@@ -798,21 +855,24 @@ def main():
         findings
     )
 
-    if args.csv:
+    write_findings_csv(
+        findings,
+        findings_path,
+    )
 
-        csv_path = Path(
-            args.csv
-        ).resolve()
+    write_rule_summary_csv(
+        rules,
+        findings,
+        summary_path,
+    )
 
-        write_csv(
-            findings,
-            csv_path,
-        )
-
-        print()
-        print(
-            f"CSV written to: {csv_path}"
-        )
+    print()
+    print(
+        f"Findings CSV: {findings_path}"
+    )
+    print(
+        f"Rule summary: {summary_path}"
+    )
 
 
 if __name__ == "__main__":
