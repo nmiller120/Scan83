@@ -5,12 +5,12 @@ Ignition 8.1 -> 8.3.8 Compatibility Scanner
 
 Features:
 - Recursively scans an Ignition projects directory
-- Loads simple regex rules from CSV
+- Loads all compatibility rules from CSV
 - Skips Ignition's .resources folder and common dev/build folders
 - Tracks project name from the first directory below the scan root
-- Writes detailed findings CSV
-- Writes rule summary CSV with occurrence/project counts
-- All compatibility rules are loaded from CSV; there are no built-in scan rules
+- Shows a spinner while scanning so long scans do not appear hung
+- Writes detailed findings.csv and rule_summary.csv into one reports directory
+- Prints only a concise completion summary with elapsed execution time
 
 Usage:
 
@@ -18,18 +18,20 @@ Usage:
 
     python ignition83_scan.py "C:\\Program Files\\Inductive Automation\\Ignition\\data\\projects" \
         --rules ignition83_rules.csv \
-        --findings reports\\findings.csv \
-        --summary reports\\rule_summary.csv
+        --reports reports
 """
 
 import argparse
 import csv
+import itertools
 import os
 import re
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Dict, Set
+from typing import Dict, List, Optional, Set
 
 
 # ============================================================
@@ -123,6 +125,40 @@ REQUIRED_RULE_FIELDS = {
     "status",
     "notes",
 }
+
+
+# ============================================================
+# SPINNER
+# ============================================================
+
+class Spinner:
+    def __init__(self, message: str = "Scanning"):
+        self.message = message
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    def start(self) -> None:
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+
+    def _spin(self) -> None:
+        for frame in itertools.cycle("|/-\\"):
+            if self._stop_event.is_set():
+                break
+
+            sys.stdout.write(f"\r{self.message} {frame}")
+            sys.stdout.flush()
+            time.sleep(0.1)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+        if self._thread is not None:
+            self._thread.join()
+
+        sys.stdout.write("\r" + " " * (len(self.message) + 4) + "\r")
+        sys.stdout.flush()
 
 
 # ============================================================
@@ -390,54 +426,6 @@ def sort_findings(findings: List[Finding]) -> List[Finding]:
     )
 
 
-def print_findings(findings: List[Finding]) -> None:
-    if not findings:
-        print("No findings.")
-        return
-
-    for finding in findings:
-        print()
-        print("=" * 80)
-        print(f"[{finding.severity}] {finding.rule_id}")
-        print(f"Project: {finding.project}")
-        print(f"{finding.file}:{finding.line}")
-
-        print()
-        print(f"  {finding.code}")
-
-        print()
-        print("Issue:")
-        print(f"  {finding.message}")
-
-        print()
-        print("Recommendation:")
-        print(f"  {finding.recommendation}")
-
-    print()
-    print("=" * 80)
-    print("SUMMARY")
-
-    counts = {}
-
-    for finding in findings:
-        counts[finding.severity] = (
-            counts.get(finding.severity, 0) + 1
-        )
-
-    for severity in [
-        "RED",
-        "ORANGE",
-        "YELLOW",
-        "GREEN",
-    ]:
-        print(
-            f"  {severity:<7}: "
-            f"{counts.get(severity, 0)}"
-        )
-
-    print(f"  TOTAL  : {len(findings)}")
-
-
 def write_findings_csv(
     findings: List[Finding],
     filename: Path,
@@ -594,20 +582,11 @@ def main():
     )
 
     parser.add_argument(
-        "--findings",
-        default="reports/findings.csv",
+        "--reports",
+        default="reports",
         help=(
-            "Detailed findings CSV "
-            "(default: reports/findings.csv)"
-        ),
-    )
-
-    parser.add_argument(
-        "--summary",
-        default="reports/rule_summary.csv",
-        help=(
-            "Rule summary CSV "
-            "(default: reports/rule_summary.csv)"
+            "Directory for generated reports "
+            "(default: reports)"
         ),
     )
 
@@ -615,8 +594,9 @@ def main():
 
     root = Path(args.root).resolve()
     rules_path = Path(args.rules).resolve()
-    findings_path = Path(args.findings).resolve()
-    summary_path = Path(args.summary).resolve()
+    reports_path = Path(args.reports).resolve()
+    findings_path = reports_path / "findings.csv"
+    summary_path = reports_path / "rule_summary.csv"
 
     if not root.exists():
         print(
@@ -634,48 +614,42 @@ def main():
         )
         sys.exit(1)
 
-    enabled_count = sum(
-        1 for rule in rules if rule.enabled
-    )
+    start_time = time.perf_counter()
+    spinner = Spinner("Scanning Ignition projects")
+    spinner.start()
 
-    print(f"Scanning: {root}")
-    print(f"Rules:    {rules_path}")
+    try:
+        findings = scan_repository(
+            root,
+            rules,
+        )
+
+        findings = sort_findings(
+            findings
+        )
+
+        write_findings_csv(
+            findings,
+            findings_path,
+        )
+
+        write_rule_summary_csv(
+            rules,
+            findings,
+            summary_path,
+        )
+    finally:
+        spinner.stop()
+
+    elapsed = time.perf_counter() - start_time
+    enabled_count = sum(1 for rule in rules if rule.enabled)
+
     print(
-        f"Loaded:   {len(rules)} rules "
-        f"({enabled_count} enabled)"
+        f"Complete in {elapsed:.2f}s | "
+        f"{len(findings)} findings | "
+        f"{enabled_count}/{len(rules)} rules enabled"
     )
-
-    findings = scan_repository(
-        root,
-        rules,
-    )
-
-    findings = sort_findings(
-        findings
-    )
-
-    print_findings(
-        findings
-    )
-
-    write_findings_csv(
-        findings,
-        findings_path,
-    )
-
-    write_rule_summary_csv(
-        rules,
-        findings,
-        summary_path,
-    )
-
-    print()
-    print(
-        f"Findings CSV: {findings_path}"
-    )
-    print(
-        f"Rule summary: {summary_path}"
-    )
+    print(f"Reports: {reports_path}")
 
 
 if __name__ == "__main__":
