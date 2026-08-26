@@ -26,6 +26,7 @@ SEVERITY_ORDER = {"RED": 0, "ORANGE": 1, "YELLOW": 2, "GREEN": 3}
 REQUIRED_RULE_FIELDS = {"rule_id", "severity", "category", "pattern", "description", "reason", "recommendation", "test_procedure", "affected_versions", "fixed_version", "reference", "status", "notes"}
 VERSION_PATTERN = re.compile(r"\b\d+\.\d+\.\d+(?:[-+._][A-Za-z0-9.-]+)?\b")
 VERSION_MANIFEST_KEYS = ("Implementation-Version", "Bundle-Version", "Specification-Version")
+VISION_RESOURCE_MARKER = "com.inductiveautomation.vision"
 
 
 @dataclass
@@ -63,9 +64,15 @@ class Rule:
     flags: int = 0
 
 
-class ProgressReporter:
-    """Prints item-by-item progress plus a periodic heartbeat for slow resources."""
+@dataclass
+class BinaryVisionResource:
+    project: str
+    resource: str
+    file: str
+    size_bytes: int
 
+
+class ProgressReporter:
     def __init__(self, heartbeat_seconds=10):
         self.heartbeat_seconds = heartbeat_seconds
         self.start_time = time.perf_counter()
@@ -86,17 +93,13 @@ class ProgressReporter:
 
     def set_phase(self, phase, total=0):
         with self._lock:
-            self.phase = phase
-            self.current = ""
-            self.completed = 0
-            self.total = total
+            self.phase, self.current, self.completed, self.total = phase, "", 0, total
         print(f"\n{phase} ({total} items)" if total else f"\n{phase}", flush=True)
 
     def begin_item(self, name):
         with self._lock:
             self.current = name
-            completed = self.completed
-            total = self.total
+            completed, total = self.completed, self.total
         prefix = f"[{completed + 1}/{total}]" if total else "[... ]"
         print(f"  {prefix} {name}", flush=True)
 
@@ -110,20 +113,13 @@ class ProgressReporter:
     def _heartbeat(self):
         while not self._stop_event.wait(self.heartbeat_seconds):
             with self._lock:
-                phase = self.phase
-                current = self.current
-                completed = self.completed
-                total = self.total
-                files_scanned = self.files_scanned
-                findings = self.findings
+                phase, current = self.phase, self.current
+                completed, total = self.completed, self.total
+                files_scanned, findings = self.files_scanned, self.findings
             elapsed = time.perf_counter() - self.start_time
-            item = f" | current: {current}" if current else ""
             progress = f"{completed}/{total}" if total else str(completed)
-            print(
-                f"    ... still working | {phase}: {progress}{item} | "
-                f"files: {files_scanned} | findings: {findings} | elapsed: {elapsed:.1f}s",
-                flush=True,
-            )
+            current_text = f" | current: {current}" if current else ""
+            print(f"    ... still working | {phase}: {progress}{current_text} | files: {files_scanned} | findings: {findings} | elapsed: {elapsed:.1f}s", flush=True)
 
     def stop(self):
         self._stop_event.set()
@@ -327,8 +323,7 @@ def list_projects(projects_root):
 
 
 def scan_project(project_path, projects_root, rules):
-    findings = []
-    files_scanned = 0
+    findings, files_scanned = [], 0
     for current_root, dirs, files in os.walk(project_path):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for filename in files:
@@ -354,6 +349,55 @@ def scan_projects_with_progress(projects_root, rules, progress):
         progress.finish_item(file_count, len(project_findings))
         print(f"      files: {file_count} | findings: {len(project_findings)}", flush=True)
     return findings, len(projects)
+
+
+def is_binary_vision_resource(path):
+    if path.suffix.lower() != ".bin":
+        return False
+    return VISION_RESOURCE_MARKER in path.as_posix().lower()
+
+
+def vision_resource_name(project_path, path):
+    try:
+        relative = path.relative_to(project_path)
+    except ValueError:
+        return path.parent.name
+    parts = list(relative.parts)
+    if parts and parts[-1].lower().endswith(".bin"):
+        parts = parts[:-1]
+    marker_index = next((i for i, part in enumerate(parts) if VISION_RESOURCE_MARKER in part.lower()), None)
+    if marker_index is not None:
+        parts = parts[marker_index + 1:]
+    return "/".join(parts) if parts else path.parent.name
+
+
+def detect_binary_vision_resources(projects_root, progress):
+    projects = list_projects(projects_root)
+    resources = []
+    progress.set_phase("Vision binary coverage", len(projects))
+    for project in projects:
+        progress.begin_item(project.name)
+        project_resources = []
+        for current_root, dirs, files in os.walk(project):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for filename in files:
+                path = Path(current_root) / filename
+                if not is_binary_vision_resource(path):
+                    continue
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    size = 0
+                project_resources.append(BinaryVisionResource(
+                    project=project.name,
+                    resource=vision_resource_name(project, path),
+                    file=str(path.relative_to(projects_root)),
+                    size_bytes=size,
+                ))
+        resources.extend(project_resources)
+        progress.finish_item(len(project_resources), 0)
+        print(f"      binary Vision resources: {len(project_resources)}", flush=True)
+    return resources
 
 
 def scan_tag_events_with_progress(install_root, rules, progress):
@@ -406,6 +450,22 @@ def write_rule_summary_csv(rules, findings, filename):
             writer.writerow([r.rule_id, r.severity, r.category, "Yes" if r.enabled else "No", counts.get(r.rule_id, 0), "; ".join(affected), len(affected), r.description, r.reason, r.recommendation, r.test_procedure, r.affected_versions, r.fixed_version, r.reference, r.status, r.notes, r.pattern])
 
 
+def write_binary_vision_csv(resources, filename):
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    with filename.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Project", "Resource", "File", "Size Bytes", "Coverage Status", "Recommendation"])
+        for resource in sorted(resources, key=lambda x: (x.project.lower(), x.resource.lower(), x.file.lower())):
+            writer.writerow([
+                resource.project,
+                resource.resource,
+                resource.file,
+                resource.size_bytes,
+                "Not statically scanned",
+                "Open/modify/save this Vision resource in an Ignition 8.3 Designer to convert it to XML, then rerun the scanner.",
+            ])
+
+
 def main():
     parser = argparse.ArgumentParser(description="Scan an upgraded Ignition installation for 8.3 compatibility hazards.")
     parser.add_argument("root", nargs="?", default=DEFAULT_WINDOWS_ROOT, help=f"Ignition installation directory (default: {DEFAULT_WINDOWS_ROOT})")
@@ -421,6 +481,7 @@ def main():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     findings_path = reports_path / f"findings_{timestamp}.csv"
     summary_path = reports_path / f"rule_summary_{timestamp}.csv"
+    binary_vision_path = reports_path / f"vision_binary_resources_{timestamp}.csv"
 
     if not install_root.is_dir():
         print(f"Ignition install directory does not exist: {install_root}", file=sys.stderr)
@@ -437,7 +498,7 @@ def main():
 
     rules = filter_rules_by_severity(all_rules, args.min_severity)
     gateway_version = detect_gateway_version(install_root)
-    print(f"Gateway version: {gateway_version}", flush=True)
+    print(f"Gateway version:  {gateway_version}", flush=True)
     print(f"Minimum severity: {args.min_severity} (includes more severe rules)", flush=True)
     print(f"Rules selected:   {len(rules)}/{len(all_rules)}", flush=True)
     print(f"Projects root:    {projects_root}", flush=True)
@@ -448,31 +509,50 @@ def main():
     progress.start()
     try:
         project_findings, project_count = scan_projects_with_progress(projects_root, rules, progress)
+        binary_vision_resources = detect_binary_vision_resources(projects_root, progress)
         tag_findings, tag_scripts = scan_tag_events_with_progress(install_root, rules, progress)
-        progress.set_phase("Writing reports", 2)
+
+        report_count = 3 if binary_vision_resources else 2
+        progress.set_phase("Writing reports", report_count)
         findings = sort_findings(project_findings + tag_findings)
+
         progress.begin_item(findings_path.name)
         write_findings_csv(findings, findings_path)
         progress.finish_item(1, 0)
+
         progress.begin_item(summary_path.name)
         write_rule_summary_csv(rules, findings, summary_path)
         progress.finish_item(1, 0)
+
+        if binary_vision_resources:
+            progress.begin_item(binary_vision_path.name)
+            write_binary_vision_csv(binary_vision_resources, binary_vision_path)
+            progress.finish_item(1, 0)
     finally:
         progress.stop()
 
     elapsed = time.perf_counter() - start_time
     enabled_count = sum(1 for r in rules if r.enabled)
+
     print("\nScan complete")
-    print(f"  Time:              {elapsed:.2f}s")
-    print(f"  Minimum severity:  {args.min_severity}")
-    print(f"  Projects scanned:  {project_count}")
-    print(f"  Tag scripts:       {len(tag_scripts)}")
-    print(f"  Project findings:  {len(project_findings)}")
-    print(f"  Tag findings:      {len(tag_findings)}")
-    print(f"  Total findings:    {len(findings)}")
-    print(f"  Rules enabled:     {enabled_count}/{len(rules)} selected ({len(all_rules)} total configured)")
-    print(f"  Findings:          {findings_path}")
-    print(f"  Summary:           {summary_path}")
+    print(f"  Time:                    {elapsed:.2f}s")
+    print(f"  Minimum severity:        {args.min_severity}")
+    print(f"  Projects scanned:        {project_count}")
+    print(f"  Tag scripts:             {len(tag_scripts)}")
+    print(f"  Project findings:        {len(project_findings)}")
+    print(f"  Tag findings:            {len(tag_findings)}")
+    print(f"  Total findings:          {len(findings)}")
+    print(f"  Binary Vision resources: {len(binary_vision_resources)}")
+    print(f"  Rules enabled:           {enabled_count}/{len(rules)} selected ({len(all_rules)} total configured)")
+    print(f"  Findings:                {findings_path}")
+    print(f"  Summary:                 {summary_path}")
+
+    if binary_vision_resources:
+        print(f"  Vision coverage gaps:    {binary_vision_path}")
+        print("\nWARNING: Binary Vision resources remain and were not statically inspected for embedded scripts.")
+        print("Open/modify/save those resources in the 8.3 Designer, then rerun the scanner for fuller coverage.")
+    else:
+        print("  Vision coverage:         No binary Vision .bin resources detected")
 
 
 if __name__ == "__main__":
