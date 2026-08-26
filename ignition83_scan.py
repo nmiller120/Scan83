@@ -28,6 +28,8 @@ VERSION_PATTERN = re.compile(r"\b\d+\.\d+\.\d+(?:[-+._][A-Za-z0-9.-]+)?\b")
 VERSION_MANIFEST_KEYS = ("Implementation-Version", "Bundle-Version", "Specification-Version")
 VISION_RESOURCE_MARKER = "com.inductiveautomation.vision"
 VISION_SCRIPT_CONTAINER_NAMES = {"window", "windows", "template", "templates"}
+ANSI_YELLOW = "\033[33m"
+ANSI_RESET = "\033[0m"
 
 
 @dataclass
@@ -126,6 +128,12 @@ class ProgressReporter:
         self._stop_event.set()
         if self._thread:
             self._thread.join()
+
+
+def yellow(text):
+    if sys.stdout.isatty():
+        return f"{ANSI_YELLOW}{text}{ANSI_RESET}"
+    return text
 
 
 def get_projects_root(install_root):
@@ -399,14 +407,17 @@ def scan_projects_with_progress(projects_root, rules, progress):
         project_stats[project.name] = {
             "files_scanned": file_count,
             "script_findings": len(project_findings),
-            "binary_vision_resources": len(project_binary),
+            "untracked_vision_binaries": len(project_binary),
         }
         progress.finish_item(file_count, len(project_findings))
-        print(
-            f"      files: {file_count} | binary Vision script candidates: {len(project_binary)} | "
-            f"script findings: {len(project_findings)}",
-            flush=True,
+        coverage_text = (
+            f"untracked Vision binaries: {len(project_binary)} [WARNING]"
+            if project_binary
+            else "untracked Vision binaries: 0"
         )
+        if project_binary:
+            coverage_text = yellow(coverage_text)
+        print(f"      files: {file_count} | {coverage_text} | script findings: {len(project_findings)}", flush=True)
 
     return findings, binary_resources, project_stats
 
@@ -472,7 +483,7 @@ def write_binary_vision_csv(resources, filename):
                 resource.resource,
                 resource.file,
                 resource.size_bytes,
-                "Not statically scanned",
+                "Untracked Vision Binary",
                 "Open/modify/save this Vision window/template in an Ignition 8.3 Designer to convert it to XML, then rerun the scanner.",
             ])
 
@@ -483,11 +494,11 @@ def write_scan_summary_csv(project_stats, binary_resources, project_findings, ta
     global_findings = len(project_findings) + len(tag_findings)
     with filename.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["Scope Type", "Scope", "Binary Vision Script Candidates", "Script Findings", "Files/Scripts Scanned"])
+        writer.writerow(["Scope Type", "Scope", "Untracked Vision Binaries", "Script Findings", "Files/Scripts Scanned"])
         writer.writerow(["Global", "All", global_binary, global_findings, sum(x["files_scanned"] for x in project_stats.values()) + len(tag_scripts)])
         for project in sorted(project_stats, key=str.lower):
             stats = project_stats[project]
-            writer.writerow(["Project", project, stats["binary_vision_resources"], stats["script_findings"], stats["files_scanned"]])
+            writer.writerow(["Project", project, stats["untracked_vision_binaries"], stats["script_findings"], stats["files_scanned"]])
         writer.writerow(["Tag Events", "Gateway", 0, len(tag_findings), len(tag_scripts)])
 
 
@@ -507,7 +518,7 @@ def main():
     findings_path = reports_path / f"findings_{timestamp}.csv"
     summary_path = reports_path / f"rule_summary_{timestamp}.csv"
     scan_summary_path = reports_path / f"scan_summary_{timestamp}.csv"
-    binary_vision_path = reports_path / f"vision_binary_script_candidates_{timestamp}.csv"
+    binary_vision_path = reports_path / f"untracked_vision_binaries_{timestamp}.csv"
 
     if not install_root.is_dir():
         print(f"Ignition install directory does not exist: {install_root}", file=sys.stderr)
@@ -568,10 +579,21 @@ def main():
     print(f"  Minimum severity:  {args.min_severity}")
     print(f"  Rules enabled:     {enabled_count}/{len(rules)} selected ({len(all_rules)} total configured)")
     print("\nScript coverage")
-    print(f"  Global -> binary Vision script candidates: {len(binary_vision_resources)} -> script findings: {len(findings)}")
+
+    global_coverage = f"  Global -> untracked Vision binaries: {len(binary_vision_resources)}"
+    if binary_vision_resources:
+        global_coverage = yellow(global_coverage + " [WARNING]")
+    print(global_coverage)
+    print(f"           script findings: {len(findings)}")
+
     for project in sorted(project_stats, key=str.lower):
         stats = project_stats[project]
-        print(f"  {project} -> binary Vision: {stats['binary_vision_resources']} -> script findings: {stats['script_findings']}")
+        line = f"  {project} -> untracked Vision binaries: {stats['untracked_vision_binaries']}"
+        if stats["untracked_vision_binaries"]:
+            line = yellow(line + " [WARNING]")
+        print(line)
+        print(f"      script findings: {stats['script_findings']}")
+
     print(f"  Gateway tag events -> scripts scanned: {len(tag_scripts)} -> script findings: {len(tag_findings)}")
     print("\nReports")
     print(f"  Findings:       {findings_path}")
@@ -579,11 +601,11 @@ def main():
     print(f"  Scan summary:   {scan_summary_path}")
 
     if binary_vision_resources:
-        print(f"  Vision gaps:    {binary_vision_path}")
-        print("\nWARNING: Binary Vision windows/templates remain and may contain embedded scripts that were not statically inspected.")
-        print("Open/modify/save those resources in the 8.3 Designer, then rerun the scanner for fuller coverage.")
+        print(yellow(f"  Untracked Vision binaries: {binary_vision_path}"))
+        print(yellow("\nWARNING: Untracked Vision binaries remain. These windows/templates may contain embedded scripts that were not statically inspected."))
+        print(yellow("Open/modify/save those resources in the 8.3 Designer, then rerun the scanner for fuller coverage."))
     else:
-        print("  Vision coverage: No binary Vision windows/templates detected")
+        print("  Vision coverage: No untracked Vision binaries detected")
 
 
 if __name__ == "__main__":
