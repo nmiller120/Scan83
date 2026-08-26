@@ -167,7 +167,6 @@ def version_from_running_gateway(install_root):
         https_port = int(settings.get("gateway.sslport", "8043"))
     except ValueError:
         https_port = 8043
-
     urls = [
         f"http://127.0.0.1:{http_port}/system/gwinfo",
         f"http://127.0.0.1:{http_port}/main/system/gwinfo",
@@ -246,7 +245,6 @@ def load_rules(path):
             missing = REQUIRED_RULE_FIELDS - set(reader.fieldnames)
             if missing:
                 raise ValueError("Rules CSV is missing required columns: " + ", ".join(sorted(missing)))
-
             rules, seen = [], set()
             for row_number, row in enumerate(reader, start=2):
                 rule_id = (row.get("rule_id") or "").strip()
@@ -274,6 +272,11 @@ def load_rules(path):
             return rules
     except FileNotFoundError:
         raise ValueError(f"Rules file not found: {path}")
+
+
+def filter_rules_by_severity(rules, min_severity):
+    threshold = SEVERITY_ORDER[min_severity]
+    return [rule for rule in rules if SEVERITY_ORDER[rule.severity] <= threshold]
 
 
 def looks_binary(path):
@@ -315,19 +318,12 @@ def scan_regex_rules(text, relative_path, project, rules, source_type="Project",
             continue
         for match in re.compile(rule.pattern, rule.flags).finditer(text):
             line = line_number(text, match.start())
-            findings.append(Finding(
-                rule.severity, rule.rule_id, project, relative_path, line,
-                get_line(text, line), rule.description, rule.recommendation,
-                source_type, provider, resource, event,
-            ))
+            findings.append(Finding(rule.severity, rule.rule_id, project, relative_path, line, get_line(text, line), rule.description, rule.recommendation, source_type, provider, resource, event))
     return findings
 
 
 def list_projects(projects_root):
-    return sorted(
-        [p for p in projects_root.iterdir() if p.is_dir() and p.name not in SKIP_DIRS],
-        key=lambda p: p.name.lower(),
-    )
+    return sorted([p for p in projects_root.iterdir() if p.is_dir() and p.name not in SKIP_DIRS], key=lambda p: p.name.lower())
 
 
 def scan_project(project_path, projects_root, rules):
@@ -343,12 +339,7 @@ def scan_project(project_path, projects_root, rules):
             if text is None:
                 continue
             files_scanned += 1
-            findings.extend(scan_regex_rules(
-                text,
-                str(path.relative_to(projects_root)),
-                project_path.name,
-                rules,
-            ))
+            findings.extend(scan_regex_rules(text, str(path.relative_to(projects_root)), project_path.name, rules))
     return findings, files_scanned
 
 
@@ -356,57 +347,38 @@ def scan_projects_with_progress(projects_root, rules, progress):
     projects = list_projects(projects_root)
     findings = []
     progress.set_phase("Project resources", len(projects))
-
     for project in projects:
         progress.begin_item(project.name)
         project_findings, file_count = scan_project(project, projects_root, rules)
         findings.extend(project_findings)
         progress.finish_item(file_count, len(project_findings))
         print(f"      files: {file_count} | findings: {len(project_findings)}", flush=True)
-
     return findings, len(projects)
 
 
 def scan_tag_events_with_progress(install_root, rules, progress):
-    # Discovery parses the migrated 8.3 tag-definition resource tree.
     progress.set_phase("Discovering tag event scripts")
     tag_scripts = discover_tag_event_scripts(install_root)
-
     providers = {}
     for script in tag_scripts:
         providers.setdefault(script.provider or "(unknown provider)", []).append(script)
-
     provider_names = sorted(providers, key=str.lower)
     progress.set_phase("Tag event scripts", len(provider_names))
     findings = []
-
     for provider in provider_names:
         scripts = providers[provider]
         progress.begin_item(f"[{provider}] ({len(scripts)} scripts)")
         provider_findings = []
         for script in scripts:
-            provider_findings.extend(scan_regex_rules(
-                script.script,
-                script.source_file,
-                "(gateway)",
-                rules,
-                source_type="Tag Event",
-                provider=script.provider,
-                resource=script.tag_path,
-                event=script.event,
-            ))
+            provider_findings.extend(scan_regex_rules(script.script, script.source_file, "(gateway)", rules, source_type="Tag Event", provider=script.provider, resource=script.tag_path, event=script.event))
         findings.extend(provider_findings)
         progress.finish_item(len(scripts), len(provider_findings))
         print(f"      scripts: {len(scripts)} | findings: {len(provider_findings)}", flush=True)
-
     return findings, tag_scripts
 
 
 def sort_findings(findings):
-    return sorted(findings, key=lambda f: (
-        SEVERITY_ORDER.get(f.severity, 99), f.source_type, f.project,
-        f.provider, f.resource, f.file, f.line, f.rule_id,
-    ))
+    return sorted(findings, key=lambda f: (SEVERITY_ORDER.get(f.severity, 99), f.source_type, f.project, f.provider, f.resource, f.file, f.line, f.rule_id))
 
 
 def write_findings_csv(findings, filename):
@@ -439,6 +411,7 @@ def main():
     parser.add_argument("root", nargs="?", default=DEFAULT_WINDOWS_ROOT, help=f"Ignition installation directory (default: {DEFAULT_WINDOWS_ROOT})")
     parser.add_argument("--rules", default="ignition83_rules.csv", help="CSV rules file (default: ignition83_rules.csv)")
     parser.add_argument("--reports", default="reports", help="Directory for generated reports (default: reports)")
+    parser.add_argument("--min-severity", choices=("RED", "ORANGE", "YELLOW", "GREEN"), default="ORANGE", type=str.upper, help="Lowest severity to scan. Includes that severity and all more severe rules (default: ORANGE).")
     args = parser.parse_args()
 
     install_root = Path(args.root).resolve()
@@ -457,31 +430,30 @@ def main():
         sys.exit(1)
 
     try:
-        rules = load_rules(rules_path)
+        all_rules = load_rules(rules_path)
     except ValueError as e:
         print(f"Rules error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    rules = filter_rules_by_severity(all_rules, args.min_severity)
     gateway_version = detect_gateway_version(install_root)
     print(f"Gateway version: {gateway_version}", flush=True)
-    print(f"Projects root:   {projects_root}", flush=True)
-    print(f"Tag resources:   {get_tag_resource_root(install_root)}", flush=True)
+    print(f"Minimum severity: {args.min_severity} (includes more severe rules)", flush=True)
+    print(f"Rules selected:   {len(rules)}/{len(all_rules)}", flush=True)
+    print(f"Projects root:    {projects_root}", flush=True)
+    print(f"Tag resources:    {get_tag_resource_root(install_root)}", flush=True)
 
     start_time = time.perf_counter()
     progress = ProgressReporter(heartbeat_seconds=10)
     progress.start()
-
     try:
         project_findings, project_count = scan_projects_with_progress(projects_root, rules, progress)
         tag_findings, tag_scripts = scan_tag_events_with_progress(install_root, rules, progress)
-
         progress.set_phase("Writing reports", 2)
         findings = sort_findings(project_findings + tag_findings)
-
         progress.begin_item(findings_path.name)
         write_findings_csv(findings, findings_path)
         progress.finish_item(1, 0)
-
         progress.begin_item(summary_path.name)
         write_rule_summary_csv(rules, findings, summary_path)
         progress.finish_item(1, 0)
@@ -490,15 +462,15 @@ def main():
 
     elapsed = time.perf_counter() - start_time
     enabled_count = sum(1 for r in rules if r.enabled)
-
     print("\nScan complete")
     print(f"  Time:              {elapsed:.2f}s")
+    print(f"  Minimum severity:  {args.min_severity}")
     print(f"  Projects scanned:  {project_count}")
     print(f"  Tag scripts:       {len(tag_scripts)}")
     print(f"  Project findings:  {len(project_findings)}")
     print(f"  Tag findings:      {len(tag_findings)}")
     print(f"  Total findings:    {len(findings)}")
-    print(f"  Rules enabled:     {enabled_count}/{len(rules)}")
+    print(f"  Rules enabled:     {enabled_count}/{len(rules)} selected ({len(all_rules)} total configured)")
     print(f"  Findings:          {findings_path}")
     print(f"  Summary:           {summary_path}")
 
