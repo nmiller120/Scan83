@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 
-"""Ignition 8.1 -> 8.3.8 Compatibility Scanner."""
+"""Ignition 8.1 -> 8.3.8 compatibility scanner."""
 
 import argparse
 import csv
 import itertools
 import os
 import re
+import ssl
 import sys
 import threading
 import time
+import urllib.request
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -105,81 +108,134 @@ def get_projects_root(install_root: Path) -> Path:
     return install_root / "data" / "projects"
 
 
+def parse_gateway_xml(install_root: Path) -> Dict[str, str]:
+    gateway_xml = install_root / "data" / "gateway.xml"
+    values: Dict[str, str] = {}
+
+    try:
+        root = ET.parse(gateway_xml).getroot()
+    except (OSError, ET.ParseError):
+        return values
+
+    for entry in root.iter("entry"):
+        key = entry.attrib.get("key")
+        if key and entry.text:
+            values[key] = entry.text.strip()
+
+    return values
+
+
+def parse_gwinfo(text: str) -> Dict[str, str]:
+    result = {}
+    for pair in text.split(";"):
+        if "=" not in pair:
+            continue
+        key, value = pair.split("=", 1)
+        result[key.strip()] = value.strip()
+    return result
+
+
+def version_from_running_gateway(install_root: Path) -> Optional[str]:
+    settings = parse_gateway_xml(install_root)
+
+    try:
+        http_port = int(settings.get("gateway.port", "8088"))
+    except ValueError:
+        http_port = 8088
+
+    try:
+        https_port = int(settings.get("gateway.sslport", "8043"))
+    except ValueError:
+        https_port = 8043
+
+    urls = [
+        f"http://127.0.0.1:{http_port}/system/gwinfo",
+        f"http://127.0.0.1:{http_port}/main/system/gwinfo",
+        f"https://127.0.0.1:{https_port}/system/gwinfo",
+        f"https://127.0.0.1:{https_port}/main/system/gwinfo",
+    ]
+
+    insecure_context = ssl._create_unverified_context()
+
+    for url in urls:
+        try:
+            if url.startswith("https://"):
+                response = urllib.request.urlopen(url, timeout=2.0, context=insecure_context)
+            else:
+                response = urllib.request.urlopen(url, timeout=2.0)
+
+            with response:
+                text = response.read().decode("utf-8", errors="replace")
+        except Exception:
+            continue
+
+        version = parse_gwinfo(text).get("Version")
+        if version and VERSION_PATTERN.fullmatch(version):
+            return version
+
+    return None
+
+
 def parse_manifest(manifest_text: str) -> Dict[str, str]:
     values = {}
     current_key = None
+
     for raw_line in manifest_text.splitlines():
         if raw_line.startswith(" ") and current_key:
             values[current_key] += raw_line[1:]
             continue
+
         if ":" not in raw_line:
             current_key = None
             continue
+
         key, value = raw_line.split(":", 1)
         current_key = key.strip()
         values[current_key] = value.strip()
+
     return values
 
 
 def version_from_jar(path: Path) -> Optional[str]:
     try:
         with zipfile.ZipFile(path, "r") as jar:
-            manifest = jar.read("META-INF/MANIFEST.MF").decode("utf-8", errors="replace")
+            manifest = jar.read("META-INF/MANIFEST.MF").decode(
+                "utf-8", errors="replace"
+            )
     except (OSError, KeyError, zipfile.BadZipFile):
         return None
 
     values = parse_manifest(manifest)
     for key in VERSION_MANIFEST_KEYS:
         value = values.get(key)
-        if value:
-            match = VERSION_PATTERN.search(value)
-            if match:
-                return match.group(0)
-    return None
-
-
-def version_from_text_file(path: Path) -> Optional[str]:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-
-    for line in text.splitlines():
-        if "ignition" not in line.lower() and "version" not in line.lower():
+        if not value:
             continue
-        match = VERSION_PATTERN.search(line)
+        match = VERSION_PATTERN.search(value)
         if match:
             return match.group(0)
+
     return None
 
 
 def detect_gateway_version(install_root: Path) -> str:
+    # Primary source: ask the running Gateway what version it is.
+    version = version_from_running_gateway(install_root)
+    if version:
+        return version
+
+    # Conservative offline fallback. Do not scan arbitrary JARs: dependency
+    # versions can look like valid Ignition versions (for example 9.9.1).
     preferred_jars = [
         install_root / "lib" / "core" / "common" / "common.jar",
         install_root / "lib" / "core" / "gateway" / "gateway.jar",
     ]
 
     for jar_path in preferred_jars:
-        if jar_path.is_file():
-            version = version_from_jar(jar_path)
-            if version:
-                return version
-
-    core_root = install_root / "lib" / "core"
-    if core_root.is_dir():
-        for jar_path in core_root.rglob("*.jar"):
-            version = version_from_jar(jar_path)
-            if version and version.startswith(("7.", "8.", "9.")):
-                return version
-
-    for metadata_file in (
-        install_root / "install.log",
-        install_root / "data" / "ignition.conf",
-    ):
-        if metadata_file.is_file():
-            version = version_from_text_file(metadata_file)
-            if version:
-                return version
+        if not jar_path.is_file():
+            continue
+        version = version_from_jar(jar_path)
+        if version and version.startswith("8."):
+            return version
 
     return "Unknown"
 
@@ -207,6 +263,7 @@ def load_rules(path: Path) -> List[Rule]:
 
             rules = []
             seen_ids = set()
+
             for row_number, row in enumerate(reader, start=2):
                 rule_id = (row.get("rule_id") or "").strip()
                 if not rule_id:
@@ -245,6 +302,7 @@ def load_rules(path: Path) -> List[Rule]:
                     notes=(row.get("notes") or "").strip(),
                     enabled=parse_bool(row.get("enabled", "true")),
                 ))
+
             return rules
     except FileNotFoundError:
         raise ValueError(f"Rules file not found: {path}")
@@ -305,9 +363,11 @@ def scan_regex_rules(
     rules: List[Rule],
 ) -> List[Finding]:
     findings = []
+
     for rule in rules:
         if not rule.enabled:
             continue
+
         regex = re.compile(rule.pattern, rule.flags)
         for match in regex.finditer(text):
             line = line_number(text, match.start())
@@ -321,24 +381,30 @@ def scan_regex_rules(
                 message=rule.description,
                 recommendation=rule.recommendation,
             ))
+
     return findings
 
 
 def scan_repository(root: Path, rules: List[Rule]) -> List[Finding]:
     findings = []
+
     for current_root, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         current_path = Path(current_root)
+
         for filename in files:
             path = current_path / filename
             if not should_scan(path):
                 continue
+
             text = read_text(path)
             if text is None:
                 continue
+
             relative_path = str(path.relative_to(root))
             project = get_project_name(root, path)
             findings.extend(scan_regex_rules(text, relative_path, project, rules))
+
     return findings
 
 
@@ -353,6 +419,7 @@ def sort_findings(findings: List[Finding]) -> List[Finding]:
 
 def write_findings_csv(findings: List[Finding], filename: Path) -> None:
     filename.parent.mkdir(parents=True, exist_ok=True)
+
     with filename.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -392,6 +459,7 @@ def write_rule_summary_csv(
             "Recommendation", "Test Procedure", "Affected Versions", "Fixed Version",
             "Reference", "Status", "Notes", "Pattern",
         ])
+
         for rule in ordered_rules:
             projects = sorted(projects_by_rule.get(rule.rule_id, set()))
             writer.writerow([
@@ -430,7 +498,6 @@ def main():
     rules_path = Path(args.rules).resolve()
     reports_path = Path(args.reports).resolve()
 
-    # One timestamp identifies both files from the same scan and prevents overwrite.
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     findings_path = reports_path / f"findings_{timestamp}.csv"
     summary_path = reports_path / f"rule_summary_{timestamp}.csv"
