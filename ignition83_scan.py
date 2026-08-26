@@ -10,7 +10,7 @@ Features:
 - Tracks project name from the first directory below the scan root
 - Writes detailed findings CSV
 - Writes rule summary CSV with occurrence/project counts
-- Includes a small number of context-aware checks that are still implemented in Python
+- All compatibility rules are loaded from CSV; there are no built-in scan rules
 
 Usage:
 
@@ -290,7 +290,7 @@ def get_project_name(root: Path, path: Path) -> str:
 
 
 # ============================================================
-# SIMPLE CSV-BACKED REGEX RULES
+# CSV-BACKED REGEX RULES
 # ============================================================
 
 def scan_regex_rules(
@@ -323,123 +323,6 @@ def scan_regex_rules(
                     recommendation=rule.recommendation,
                 )
             )
-
-    return findings
-
-
-# ============================================================
-# CONTEXT-AWARE RULES
-#
-# These stay in Python for now because they inspect relationships
-# between lines/variables instead of just matching one regex.
-# ============================================================
-
-def scan_query_status_getdataset(
-    text: str,
-    relative_path: str,
-    project: str,
-    search_window_lines: int = 15,
-) -> List[Finding]:
-
-    findings = []
-    lines = text.splitlines()
-
-    assignment_regex = re.compile(
-        r"""
-        ^\s*
-        (?P<variable>[A-Za-z_][A-Za-z0-9_]*)
-        \s*=\s*
-        system\.alarm\.queryStatus\s*\(
-        """,
-        re.VERBOSE,
-    )
-
-    for index, line in enumerate(lines):
-        match = assignment_regex.search(line)
-
-        if not match:
-            continue
-
-        variable = match.group("variable")
-
-        get_dataset_regex = re.compile(
-            r"\b"
-            + re.escape(variable)
-            + r"\s*\.\s*getDataset\s*\("
-        )
-
-        end = min(
-            len(lines),
-            index + search_window_lines + 1,
-        )
-
-        for later_index in range(index + 1, end):
-            if get_dataset_regex.search(lines[later_index]):
-                findings.append(
-                    Finding(
-                        severity="RED",
-                        rule_id="IGN83-ALARM-002",
-                        project=project,
-                        file=relative_path,
-                        line=later_index + 1,
-                        code=lines[later_index].strip(),
-                        message=(
-                            "Return value from system.alarm.queryStatus() "
-                            "is later used with .getDataset()."
-                        ),
-                        recommendation=(
-                            "Known 8.3.8 compatibility hazard. "
-                            "If the goal is an alarm count, use len(alarms). "
-                            "Otherwise review the expected return-object behavior."
-                        ),
-                    )
-                )
-
-    return findings
-
-
-def scan_inline_query_status_getdataset(
-    text: str,
-    relative_path: str,
-    project: str,
-) -> List[Finding]:
-
-    regex = re.compile(
-        r"""
-        system\.alarm\.queryStatus
-        \s*\(
-        .*?
-        \)
-        \s*
-        \.getDataset
-        \s*\(
-        """,
-        re.VERBOSE | re.DOTALL,
-    )
-
-    findings = []
-
-    for match in regex.finditer(text):
-        line = line_number(text, match.start())
-
-        findings.append(
-            Finding(
-                severity="RED",
-                rule_id="IGN83-ALARM-003",
-                project=project,
-                file=relative_path,
-                line=line,
-                code=get_line(text, line),
-                message=(
-                    "Direct queryStatus(...).getDataset() chain detected."
-                ),
-                recommendation=(
-                    "Known 8.3.8 compatibility hazard. "
-                    "Rewrite based on what the code actually needs; "
-                    "for an alarm count use len(result)."
-                ),
-            )
-        )
 
     return findings
 
@@ -484,22 +367,6 @@ def scan_repository(
                     relative_path,
                     project,
                     rules,
-                )
-            )
-
-            findings.extend(
-                scan_query_status_getdataset(
-                    text,
-                    relative_path,
-                    project,
-                )
-            )
-
-            findings.extend(
-                scan_inline_query_status_getdataset(
-                    text,
-                    relative_path,
-                    project,
                 )
             )
 
@@ -633,70 +500,6 @@ def write_rule_summary_csv(
         rule.rule_id: rule
         for rule in rules
     }
-
-    # Add the context-aware rules so they also appear in the summary,
-    # even though they are not configured in the CSV yet.
-    builtin_rules = [
-        Rule(
-            rule_id="IGN83-ALARM-002",
-            severity="RED",
-            category="Alarm",
-            pattern="",
-            description=(
-                "queryStatus() result assigned to a variable and "
-                "later consumed with .getDataset()."
-            ),
-            reason=(
-                "Known 8.3.8 compatibility hazard involving "
-                "queryStatus return-object behavior."
-            ),
-            recommendation=(
-                "For alarm counts, use len(result). "
-                "Otherwise review the required result behavior."
-            ),
-            test_procedure=(
-                "Exercise each affected alarm binding/script in 8.3.8."
-            ),
-            affected_versions="8.3.8",
-            fixed_version="",
-            reference="",
-            status="Not Reviewed",
-            notes="Built-in context-aware scanner rule.",
-            enabled=True,
-        ),
-        Rule(
-            rule_id="IGN83-ALARM-003",
-            severity="RED",
-            category="Alarm",
-            pattern="",
-            description=(
-                "Direct system.alarm.queryStatus(...).getDataset() chain."
-            ),
-            reason=(
-                "Known 8.3.8 compatibility hazard involving "
-                "queryStatus return-object behavior."
-            ),
-            recommendation=(
-                "For alarm counts, use len(result). "
-                "Otherwise review the required result behavior."
-            ),
-            test_procedure=(
-                "Exercise each affected alarm binding/script in 8.3.8."
-            ),
-            affected_versions="8.3.8",
-            fixed_version="",
-            reference="",
-            status="Not Reviewed",
-            notes="Built-in context-aware scanner rule.",
-            enabled=True,
-        ),
-    ]
-
-    for builtin in builtin_rules:
-        rule_map.setdefault(
-            builtin.rule_id,
-            builtin,
-        )
 
     ordered_rules = sorted(
         rule_map.values(),
