@@ -4,19 +4,21 @@
 Ignition 8.1 -> 8.3.8 Compatibility Scanner
 
 Features:
-- Recursively scans an Ignition projects directory
+- Accepts the Ignition installation directory as the positional root
+- Automatically scans <install>/data/projects
+- Attempts to detect the installed Ignition Gateway version from core JAR manifests
 - Loads all compatibility rules from CSV
 - Skips Ignition's .resources folder and common dev/build folders
-- Tracks project name from the first directory below the scan root
+- Tracks project name from the first directory below data/projects
 - Shows a spinner while scanning so long scans do not appear hung
-- Writes detailed findings.csv and rule_summary.csv into one reports directory
-- Prints only a concise completion summary with elapsed execution time
+- Writes findings.csv and rule_summary.csv into one reports directory
+- Prints only a concise completion summary with elapsed time and detected Gateway version
 
 Usage:
 
-    python ignition83_scan.py "C:\\Program Files\\Inductive Automation\\Ignition\\data\\projects"
+    python ignition83_scan.py "C:\\Program Files\\Inductive Automation\\Ignition"
 
-    python ignition83_scan.py "C:\\Program Files\\Inductive Automation\\Ignition\\data\\projects" \
+    python ignition83_scan.py "C:\\Program Files\\Inductive Automation\\Ignition" \
         --rules ignition83_rules.csv \
         --reports reports
 """
@@ -29,6 +31,7 @@ import re
 import sys
 import threading
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -126,6 +129,13 @@ REQUIRED_RULE_FIELDS = {
     "notes",
 }
 
+VERSION_PATTERN = re.compile(r"\b\d+\.\d+\.\d+(?:[-+._][A-Za-z0-9.-]+)?\b")
+VERSION_MANIFEST_KEYS = (
+    "Implementation-Version",
+    "Bundle-Version",
+    "Specification-Version",
+)
+
 
 # ============================================================
 # SPINNER
@@ -159,6 +169,120 @@ class Spinner:
 
         sys.stdout.write("\r" + " " * (len(self.message) + 4) + "\r")
         sys.stdout.flush()
+
+
+# ============================================================
+# INSTALL / VERSION DETECTION
+# ============================================================
+
+def get_projects_root(install_root: Path) -> Path:
+    return install_root / "data" / "projects"
+
+
+def parse_manifest(manifest_text: str) -> Dict[str, str]:
+    values = {}
+    current_key = None
+
+    for raw_line in manifest_text.splitlines():
+        if raw_line.startswith(" ") and current_key:
+            values[current_key] += raw_line[1:]
+            continue
+
+        if ":" not in raw_line:
+            current_key = None
+            continue
+
+        key, value = raw_line.split(":", 1)
+        current_key = key.strip()
+        values[current_key] = value.strip()
+
+    return values
+
+
+def version_from_jar(path: Path) -> Optional[str]:
+    try:
+        with zipfile.ZipFile(path, "r") as jar:
+            manifest = jar.read("META-INF/MANIFEST.MF").decode(
+                "utf-8",
+                errors="replace",
+            )
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
+
+    values = parse_manifest(manifest)
+
+    for key in VERSION_MANIFEST_KEYS:
+        value = values.get(key)
+
+        if not value:
+            continue
+
+        match = VERSION_PATTERN.search(value)
+
+        if match:
+            return match.group(0)
+
+    return None
+
+
+def version_from_text_file(path: Path) -> Optional[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    ignition_lines = [
+        line
+        for line in text.splitlines()
+        if "ignition" in line.lower() or "version" in line.lower()
+    ]
+
+    for line in ignition_lines:
+        match = VERSION_PATTERN.search(line)
+
+        if match:
+            return match.group(0)
+
+    return None
+
+
+def detect_gateway_version(install_root: Path) -> str:
+    preferred_jars = [
+        install_root / "lib" / "core" / "common" / "common.jar",
+        install_root / "lib" / "core" / "gateway" / "gateway.jar",
+    ]
+
+    for jar_path in preferred_jars:
+        if not jar_path.is_file():
+            continue
+
+        version = version_from_jar(jar_path)
+
+        if version:
+            return version
+
+    core_root = install_root / "lib" / "core"
+
+    if core_root.is_dir():
+        for jar_path in core_root.rglob("*.jar"):
+            version = version_from_jar(jar_path)
+
+            if version and version.startswith(("7.", "8.", "9.")):
+                return version
+
+    for metadata_file in (
+        install_root / "install.log",
+        install_root / "data" / "ignition.conf",
+    ):
+        if not metadata_file.is_file():
+            continue
+
+        version = version_from_text_file(metadata_file)
+
+        if version:
+            return version
+
+    return "Unknown"
 
 
 # ============================================================
@@ -562,14 +686,14 @@ def write_rule_summary_csv(
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Scan Ignition projects for "
+            "Scan an Ignition installation for "
             "8.1 -> 8.3.8 compatibility hazards."
         )
     )
 
     parser.add_argument(
         "root",
-        help="Root directory containing Ignition projects",
+        help="Ignition installation directory",
     )
 
     parser.add_argument(
@@ -592,15 +716,23 @@ def main():
 
     args = parser.parse_args()
 
-    root = Path(args.root).resolve()
+    install_root = Path(args.root).resolve()
+    projects_root = get_projects_root(install_root)
     rules_path = Path(args.rules).resolve()
     reports_path = Path(args.reports).resolve()
     findings_path = reports_path / "findings.csv"
     summary_path = reports_path / "rule_summary.csv"
 
-    if not root.exists():
+    if not install_root.is_dir():
         print(
-            f"Path does not exist: {root}",
+            f"Ignition install directory does not exist: {install_root}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not projects_root.is_dir():
+        print(
+            f"Ignition projects directory not found: {projects_root}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -614,13 +746,15 @@ def main():
         )
         sys.exit(1)
 
+    gateway_version = detect_gateway_version(install_root)
+
     start_time = time.perf_counter()
     spinner = Spinner("Scanning Ignition projects")
     spinner.start()
 
     try:
         findings = scan_repository(
-            root,
+            projects_root,
             rules,
         )
 
@@ -644,12 +778,14 @@ def main():
     elapsed = time.perf_counter() - start_time
     enabled_count = sum(1 for rule in rules if rule.enabled)
 
+    print(f"Gateway version: {gateway_version}")
     print(
         f"Complete in {elapsed:.2f}s | "
         f"{len(findings)} findings | "
         f"{enabled_count}/{len(rules)} rules enabled"
     )
-    print(f"Reports: {reports_path}")
+    print(f"Projects: {projects_root}")
+    print(f"Reports:  {reports_path}")
 
 
 if __name__ == "__main__":
