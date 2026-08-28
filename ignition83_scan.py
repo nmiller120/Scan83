@@ -17,7 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from colorama import just_fix_windows_console
 from tag_event_scanner import discover_tag_event_scripts, get_tag_resource_root
+
+just_fix_windows_console()
 
 DEFAULT_WINDOWS_ROOT = r"C:\Program Files\Inductive Automation\Ignition"
 SKIP_DIRS = {".git", ".resources", ".idea", ".vs", ".vscode", "node_modules", "dist", "build", "__pycache__", ".pytest_cache", ".mypy_cache"}
