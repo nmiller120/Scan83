@@ -139,6 +139,12 @@ def yellow(text):
     return text
 
 
+def application_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 def get_projects_root(install_root):
     return install_root / "data" / "projects"
 
@@ -506,9 +512,10 @@ def write_scan_summary_csv(project_stats, binary_resources, project_findings, ta
 
 
 def main():
+    default_rules_path = application_dir() / "ignition83_rules.csv"
     parser = argparse.ArgumentParser(description="Scan an upgraded Ignition installation for 8.3 compatibility hazards.")
     parser.add_argument("root", nargs="?", default=DEFAULT_WINDOWS_ROOT, help=f"Ignition installation directory (default: {DEFAULT_WINDOWS_ROOT})")
-    parser.add_argument("--rules", default="ignition83_rules.csv", help="CSV rules file (default: ignition83_rules.csv)")
+    parser.add_argument("--rules", default=str(default_rules_path), help=f"CSV rules file (default: {default_rules_path})")
     parser.add_argument("--reports", default="reports", help="Directory for generated reports (default: reports)")
     parser.add_argument("--min-severity", choices=("RED", "ORANGE", "YELLOW", "GREEN"), default="ORANGE", type=str.upper, help="Lowest severity to scan. Includes that severity and all more severe rules (default: ORANGE).")
     args = parser.parse_args()
