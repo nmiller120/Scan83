@@ -3,6 +3,7 @@
 """Ignition 8.1 -> 8.3.8 compatibility scanner."""
 
 import argparse
+import atexit
 import csv
 import os
 import re
@@ -33,6 +34,24 @@ VISION_RESOURCE_MARKER = "com.inductiveautomation.vision"
 VISION_SCRIPT_CONTAINER_NAMES = {"window", "windows", "template", "templates"}
 ANSI_YELLOW = "\033[33m"
 ANSI_RESET = "\033[0m"
+
+
+def pause_before_exit():
+    if not sys.stdin or not sys.stdin.isatty():
+        return
+    print("\nPress any key to exit...", end="", flush=True)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.getwch()
+        else:
+            input()
+    except (EOFError, KeyboardInterrupt):
+        pass
+    print()
+
+
+atexit.register(pause_before_exit)
 
 
 @dataclass
