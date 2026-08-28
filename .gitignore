@@ -4,3 +4,15 @@
 
 /.vs
 /findings.csv
+
+# Python virtual environment
+.venv/
+
+# PyInstaller output
+build/
+dist/
+reports/
+
+# Python cache
+__pycache__/
+*.py[cod]

@@ -3,6 +3,7 @@
 """Ignition 8.1 -> 8.3.8 compatibility scanner."""
 
 import argparse
+import atexit
 import csv
 import os
 import re
@@ -17,7 +18,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from colorama import just_fix_windows_console
 from tag_event_scanner import discover_tag_event_scripts, get_tag_resource_root
+
+just_fix_windows_console()
 
 DEFAULT_WINDOWS_ROOT = r"C:\Program Files\Inductive Automation\Ignition"
 SKIP_DIRS = {".git", ".resources", ".idea", ".vs", ".vscode", "node_modules", "dist", "build", "__pycache__", ".pytest_cache", ".mypy_cache"}
@@ -30,6 +34,36 @@ VISION_RESOURCE_MARKER = "com.inductiveautomation.vision"
 VISION_SCRIPT_CONTAINER_NAMES = {"window", "windows", "template", "templates"}
 ANSI_YELLOW = "\033[33m"
 ANSI_RESET = "\033[0m"
+
+SCAN83_BANNER = r'''
+███████╗ ██████╗ █████╗ ███╗   ██╗     █████╗    ██████╗ 
+██╔════╝██╔════╝██╔══██╗████╗  ██║    ██╔══██╗   ╚════██╗
+███████╗██║     ███████║██╔██╗ ██║    ╚█████╔╝    █████╔╝
+╚════██║██║     ██╔══██║██║╚██╗██║    ██╔══██╗    ╚═══██╗
+███████║╚██████╗██║  ██║██║ ╚████║    ╚█████╔╝██╗██████╔╝
+╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝     ╚════╝ ╚═╝╚═════╝ 
+    
+----------------------------------
+IGNITION 8.3 COMPATIBILITY SCANNER
+'''
+
+
+def pause_before_exit():
+    if not sys.stdin or not sys.stdin.isatty():
+        return
+    print("\nPress any key to exit...", end="", flush=True)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.getwch()
+        else:
+            input()
+    except (EOFError, KeyboardInterrupt):
+        pass
+    print()
+
+
+atexit.register(pause_before_exit)
 
 
 @dataclass
@@ -134,6 +168,46 @@ def yellow(text):
     if sys.stdout.isatty():
         return f"{ANSI_YELLOW}{text}{ANSI_RESET}"
     return text
+
+
+def application_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def confirm_scan():
+    if not sys.stdin or not sys.stdin.isatty():
+        return True
+    while True:
+        response = input("\nContinue with scan? [Y/n]: ").strip().lower()
+        if response in {"", "y", "yes"}:
+            return True
+        if response in {"n", "no"}:
+            return False
+        print("Please enter Y or N.")
+
+
+def print_preflight_summary(gateway_version, min_severity, rules, all_rules, projects_root, tag_resources, rules_path, reports_path):
+    enabled_rules = [rule for rule in rules if rule.enabled]
+    severity_counts = {
+        severity: sum(1 for rule in enabled_rules if rule.severity == severity)
+        for severity in SEVERITY_ORDER
+    }
+
+    print(SCAN83_BANNER)
+    print("Preflight")
+    print(f"  Gateway version:  {gateway_version}")
+    print(f"  Minimum severity: {min_severity} (includes more severe rules)")
+    print(f"  Rules selected:   {len(rules)}/{len(all_rules)}")
+    print(f"  Rules enabled:    {len(enabled_rules)}/{len(rules)} selected")
+    print("  Rule summary:")
+    for severity in SEVERITY_ORDER:
+        print(f"    {severity:<6} {severity_counts[severity]}")
+    print(f"  Projects root:    {projects_root}")
+    print(f"  Tag resources:    {tag_resources}")
+    print(f"  Rules file:       {rules_path}")
+    print(f"  Reports folder:   {reports_path}")
 
 
 def get_projects_root(install_root):
@@ -503,9 +577,10 @@ def write_scan_summary_csv(project_stats, binary_resources, project_findings, ta
 
 
 def main():
+    default_rules_path = application_dir() / "ignition83_rules.csv"
     parser = argparse.ArgumentParser(description="Scan an upgraded Ignition installation for 8.3 compatibility hazards.")
     parser.add_argument("root", nargs="?", default=DEFAULT_WINDOWS_ROOT, help=f"Ignition installation directory (default: {DEFAULT_WINDOWS_ROOT})")
-    parser.add_argument("--rules", default="ignition83_rules.csv", help="CSV rules file (default: ignition83_rules.csv)")
+    parser.add_argument("--rules", default=str(default_rules_path), help=f"CSV rules file (default: {default_rules_path})")
     parser.add_argument("--reports", default="reports", help="Directory for generated reports (default: reports)")
     parser.add_argument("--min-severity", choices=("RED", "ORANGE", "YELLOW", "GREEN"), default="ORANGE", type=str.upper, help="Lowest severity to scan. Includes that severity and all more severe rules (default: ORANGE).")
     args = parser.parse_args()
@@ -535,11 +610,21 @@ def main():
 
     rules = filter_rules_by_severity(all_rules, args.min_severity)
     gateway_version = detect_gateway_version(install_root)
-    print(f"Gateway version:  {gateway_version}", flush=True)
-    print(f"Minimum severity: {args.min_severity} (includes more severe rules)", flush=True)
-    print(f"Rules selected:   {len(rules)}/{len(all_rules)}", flush=True)
-    print(f"Projects root:    {projects_root}", flush=True)
-    print(f"Tag resources:    {get_tag_resource_root(install_root)}", flush=True)
+    tag_resources = get_tag_resource_root(install_root)
+    print_preflight_summary(
+        gateway_version,
+        args.min_severity,
+        rules,
+        all_rules,
+        projects_root,
+        tag_resources,
+        rules_path,
+        reports_path,
+    )
+
+    if not confirm_scan():
+        print("\nScan cancelled.")
+        return
 
     start_time = time.perf_counter()
     progress = ProgressReporter(heartbeat_seconds=10)
