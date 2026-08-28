@@ -35,6 +35,15 @@ VISION_SCRIPT_CONTAINER_NAMES = {"window", "windows", "template", "templates"}
 ANSI_YELLOW = "\033[33m"
 ANSI_RESET = "\033[0m"
 
+SCAN83_BANNER = r'''
+   _____                 ___  _____
+  / ___/_________ _____ / _ \/__  /
+  \__ \/ ___/ __ `/ __ \_, _/ /_ <
+ ___/ / /__/ /_/ / / / /_  |___/ /
+/____/\___/\__,_/_/ /_/ /_/ /____/
+      IGNITION 8.3 COMPATIBILITY SCANNER
+'''
+
 
 def pause_before_exit():
     if not sys.stdin or not sys.stdin.isatty():
@@ -162,6 +171,40 @@ def application_dir():
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def confirm_scan():
+    if not sys.stdin or not sys.stdin.isatty():
+        return True
+    while True:
+        response = input("\nContinue with scan? [Y/n]: ").strip().lower()
+        if response in {"", "y", "yes"}:
+            return True
+        if response in {"n", "no"}:
+            return False
+        print("Please enter Y or N.")
+
+
+def print_preflight_summary(gateway_version, min_severity, rules, all_rules, projects_root, tag_resources, rules_path, reports_path):
+    enabled_rules = [rule for rule in rules if rule.enabled]
+    severity_counts = {
+        severity: sum(1 for rule in enabled_rules if rule.severity == severity)
+        for severity in SEVERITY_ORDER
+    }
+
+    print(SCAN83_BANNER)
+    print("Preflight")
+    print(f"  Gateway version:  {gateway_version}")
+    print(f"  Minimum severity: {min_severity} (includes more severe rules)")
+    print(f"  Rules selected:   {len(rules)}/{len(all_rules)}")
+    print(f"  Rules enabled:    {len(enabled_rules)}/{len(rules)} selected")
+    print("  Rule summary:")
+    for severity in SEVERITY_ORDER:
+        print(f"    {severity:<6} {severity_counts[severity]}")
+    print(f"  Projects root:    {projects_root}")
+    print(f"  Tag resources:    {tag_resources}")
+    print(f"  Rules file:       {rules_path}")
+    print(f"  Reports folder:   {reports_path}")
 
 
 def get_projects_root(install_root):
@@ -564,11 +607,21 @@ def main():
 
     rules = filter_rules_by_severity(all_rules, args.min_severity)
     gateway_version = detect_gateway_version(install_root)
-    print(f"Gateway version:  {gateway_version}", flush=True)
-    print(f"Minimum severity: {args.min_severity} (includes more severe rules)", flush=True)
-    print(f"Rules selected:   {len(rules)}/{len(all_rules)}", flush=True)
-    print(f"Projects root:    {projects_root}", flush=True)
-    print(f"Tag resources:    {get_tag_resource_root(install_root)}", flush=True)
+    tag_resources = get_tag_resource_root(install_root)
+    print_preflight_summary(
+        gateway_version,
+        args.min_severity,
+        rules,
+        all_rules,
+        projects_root,
+        tag_resources,
+        rules_path,
+        reports_path,
+    )
+
+    if not confirm_scan():
+        print("\nScan cancelled.")
+        return
 
     start_time = time.perf_counter()
     progress = ProgressReporter(heartbeat_seconds=10)
