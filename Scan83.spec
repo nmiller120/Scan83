@@ -1,11 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+import shutil
+
 
 a = Analysis(
     ['ignition83_scan.py'],
     pathex=[],
     binaries=[],
-    datas=[('ignition83_rules.csv', '.')],
+    datas=[],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -42,3 +45,7 @@ coll = COLLECT(
     upx_exclude=[],
     name='Scan83',
 )
+
+rules_source = os.path.join(SPECPATH, 'ignition83_rules.csv')
+rules_destination = os.path.join(DISTPATH, 'Scan83', 'ignition83_rules.csv')
+shutil.copy2(rules_source, rules_destination)
