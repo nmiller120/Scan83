@@ -5,7 +5,7 @@ a = Analysis(
     ['ignition83_scan.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('ignition83_rules.csv', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
