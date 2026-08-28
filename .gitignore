@@ -11,6 +11,7 @@
 # PyInstaller output
 build/
 dist/
+reports/
 
 # Python cache
 __pycache__/
