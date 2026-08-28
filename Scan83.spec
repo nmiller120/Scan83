@@ -46,6 +46,7 @@ coll = COLLECT(
     name='Scan83',
 )
 
-rules_source = os.path.join(SPECPATH, 'ignition83_rules.csv')
-rules_destination = os.path.join(DISTPATH, 'Scan83', 'ignition83_rules.csv')
-shutil.copy2(rules_source, rules_destination)
+for filename in ('ignition83_rules.csv', 'README.txt'):
+    source = os.path.join(SPECPATH, filename)
+    destination = os.path.join(DISTPATH, 'Scan83', filename)
+    shutil.copy2(source, destination)
