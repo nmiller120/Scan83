@@ -5,7 +5,7 @@ Scan83 scans an upgraded Ignition installation for known Ignition 8.1 -> 8.3 scr
 ## Quick Start
 
 1. Run Scan83 on the Ignition Gateway machine after upgrading a development or test Gateway to Ignition 8.3.
-2. Keep `Scan83.exe`, `ignition83_rules.csv`, `README.md`, `LICENSE`, and the `console-scripts` folder together in the Scan83 distribution folder.
+2. Keep `Scan83.exe`, `ignition83_rules.csv`, `ignition83_rules_full.csv`, `README.md`, `LICENSE`, and the `console-scripts` folder together in the Scan83 distribution folder.
 3. Double-click `Scan83.exe`. By default, Scan83 looks for Ignition at `C:\Program Files\Inductive Automation\Ignition`.
 4. Review the preflight screen. It shows the detected Gateway version, severity threshold, selected rules, project path, tag-resource path, rules file, and report location.
 5. At `Continue with scan? [Y/n]`, press Enter or Y to run the scan, or N to cancel.
@@ -19,6 +19,7 @@ The Windows distribution uses a single-file `Scan83.exe`; there is no `_internal
 Scan83/
 |-- Scan83.exe
 |-- ignition83_rules.csv
+|-- ignition83_rules_full.csv
 |-- README.md
 |-- LICENSE
 `-- console-scripts/
@@ -58,6 +59,12 @@ Scan83.exe --reports "C:\Scan83Reports"
 Scan83.exe --rules "C:\Scan83\custom_rules.csv"
 ```
 
+To run the expanded ruleset shipped with Scan83:
+
+```powershell
+Scan83.exe --rules .\ignition83_rules_full.csv --min-severity YELLOW
+```
+
 When running the repository source directly during development:
 
 ```powershell
@@ -79,9 +86,21 @@ The Python scanner source is not included in the packaged Windows distribution; 
 
 ## Rules
 
-`ignition83_rules.csv` is intentionally distributed separately so the compatibility rule set can be reviewed or updated without rebuilding Scan83. The default ruleset is deliberately focused on compatibility patterns with meaningful breaking-change risk rather than general deprecation inventory.
+Scan83 ships with two rule files for two different levels of review.
 
-The rules CSV can be edited directly in Excel. Set `enabled=No` to retain a rule in a rules file without scanning for it. A different or expanded rules file can be supplied with `--rules`.
+`ignition83_rules.csv` is the default, focused ruleset. It is deliberately limited to compatibility patterns with meaningful breaking-change risk and is intended for the practical question: **what is most likely to break during an 8.1 -> 8.3 upgrade?** This is the recommended ruleset for normal upgrade testing.
+
+`ignition83_rules_full.csv` is the expanded ruleset. It retains the broader catalog of Ignition 8.3 scripting changes and migration concerns, including lower-risk changes, deprecations, compatibility regressions, and rules that may require more manual review. It can be useful for a more comprehensive 8.3 migration audit or for reviewing the wider set of changes after the high-risk scan is complete.
+
+To scan with the full ruleset, pass it explicitly with `--rules`:
+
+```powershell
+Scan83.exe --rules .\ignition83_rules_full.csv --min-severity YELLOW
+```
+
+The full ruleset is intentionally broader and can produce substantially more findings. A match does not necessarily mean code is broken; many findings are prompts for review or testing. For upgrade triage, start with the default `ignition83_rules.csv` and use `ignition83_rules_full.csv` when you want the wider compatibility/deprecation inventory.
+
+Both rules CSV files are distributed separately so they can be reviewed or updated without rebuilding Scan83. Rules can be edited directly in Excel. Set `enabled=No` to retain a rule in a rules file without scanning for it, and use `--rules` to supply a customized rules file.
 
 ## Gateway Detection
 
@@ -103,6 +122,7 @@ The finished distributable files are written directly to `dist\`. The build uses
 - Functional testing of upgraded Ignition projects is still required.
 - Run the scanner against a development/test upgrade before production rollout.
 - Binary Vision resources may contain scripts that cannot be statically inspected until converted to XML-backed resources.
+- The expanded ruleset intentionally favors coverage over signal-to-noise and should not be interpreted as a list of confirmed breaking changes.
 
 ## License
 
