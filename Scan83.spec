@@ -26,6 +26,7 @@ exe = EXE(
     a.datas,
     [],
     name='Scan83',
+    icon=os.path.join(SPECPATH, 'Scan83.ico'),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -38,7 +39,7 @@ exe = EXE(
     entitlements_file=None,
 )
 
-for filename in ('ignition83_rules.csv', 'README.md', 'LICENSE'):
+for filename in ('ignition83_rules.csv', 'README.md', 'LICENSE', 'Scan83.ico'):
     source = os.path.join(SPECPATH, filename)
     destination = os.path.join(DISTPATH, filename)
     shutil.copy2(source, destination)
