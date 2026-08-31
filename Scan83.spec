@@ -46,7 +46,11 @@ coll = COLLECT(
     name='Scan83',
 )
 
-for filename in ('ignition83_rules.csv', 'README.md', 'LICENSE'):
+for filename in ('ignition83_rules.csv', 'README.md', 'LICENSE', 'ignition83_scan.py'):
     source = os.path.join(SPECPATH, filename)
     destination = os.path.join(DISTPATH, 'Scan83', filename)
     shutil.copy2(source, destination)
+
+console_scripts_source = os.path.join(SPECPATH, 'console-scripts')
+console_scripts_destination = os.path.join(DISTPATH, 'Scan83', 'console-scripts')
+shutil.copytree(console_scripts_source, console_scripts_destination, dirs_exist_ok=True)
