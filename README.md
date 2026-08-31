@@ -5,11 +5,27 @@ Scan83 scans an upgraded Ignition installation for known Ignition 8.1 -> 8.3 scr
 ## Quick Start
 
 1. Run Scan83 on the Ignition Gateway machine after upgrading a development or test Gateway to Ignition 8.3.
-2. Keep `Scan83.exe`, `ignition83_rules.csv`, `README.md`, `LICENSE`, and the `_internal` directory together in the Scan83 distribution folder.
+2. Keep `Scan83.exe`, `ignition83_rules.csv`, `README.md`, `LICENSE`, and the `console-scripts` folder together in the Scan83 distribution folder.
 3. Double-click `Scan83.exe`. By default, Scan83 looks for Ignition at `C:\Program Files\Inductive Automation\Ignition`.
 4. Review the preflight screen. It shows the detected Gateway version, severity threshold, selected rules, project path, tag-resource path, rules file, and report location.
 5. At `Continue with scan? [Y/n]`, press Enter or Y to run the scan, or N to cancel.
 6. Review the console summary and generated CSV files in the reports folder. Scan83 pauses before closing so results and error messages can be reviewed.
+
+The Windows distribution uses a single-file `Scan83.exe`; there is no `_internal` runtime directory to distribute. The Scan83 application icon is embedded directly in the executable.
+
+## Distribution Layout
+
+```text
+Scan83/
+|-- Scan83.exe
+|-- ignition83_rules.csv
+|-- README.md
+|-- LICENSE
+`-- console-scripts/
+    `-- open-vision-resources.py
+```
+
+`console-scripts/open-vision-resources.py` is an optional Ignition Designer console helper for opening Vision resources identified by Scan83's untracked Vision binary report. It is intended to assist with converting those resources into a form that can be statically inspected on a subsequent scan.
 
 ## Reports
 
@@ -23,6 +39,8 @@ Scan83 writes timestamped reports so previous scans are not overwritten:
 ## Vision Binary Warning
 
 Ignition Vision windows/templates stored as binary resources cannot be fully inspected by Scan83. For fuller coverage, convert applicable Vision resources to XML by opening/modifying/saving them in an Ignition 8.3 Designer, then rerun the scan.
+
+The included `console-scripts/open-vision-resources.py` helper can read an `untracked_vision_binaries_<timestamp>.csv` report and open the applicable Vision resources in the Designer in batches. Run it from the Ignition Designer Script Console; it is not a standalone Python utility.
 
 ## Command-Line Usage
 
@@ -40,11 +58,13 @@ Scan83.exe --reports "C:\Scan83Reports"
 Scan83.exe --rules "C:\Scan83\custom_rules.csv"
 ```
 
-When running directly from Python:
+When running the repository source directly during development:
 
 ```powershell
 python .\ignition83_scan.py "C:\Program Files\Inductive Automation\Ignition"
 ```
+
+The Python scanner source is not included in the packaged Windows distribution; normal users run `Scan83.exe`.
 
 ### Options
 
@@ -66,6 +86,16 @@ The rules CSV can be edited directly in Excel. Set `enabled=No` to retain a rule
 ## Gateway Detection
 
 The positional root is the Ignition installation directory. Scan83 automatically scans the `data/projects` directory beneath it and attempts to detect the installed Gateway version. If the version cannot be determined reliably, Scan83 reports `Gateway version: Unknown` rather than guessing.
+
+## Building the Windows Distribution
+
+Scan83 is packaged with PyInstaller using `Scan83.spec`. From the repository root, with the project virtual environment available:
+
+```powershell
+.\.venv\Scripts\pyinstaller.exe --clean Scan83.spec
+```
+
+The finished distributable files are written directly to `dist\`. The build uses PyInstaller's one-file mode, so Python and runtime dependencies are bundled into `Scan83.exe` rather than shipped in a separate `_internal` directory.
 
 ## Limitations
 
