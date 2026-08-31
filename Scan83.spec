@@ -39,7 +39,7 @@ exe = EXE(
     entitlements_file=None,
 )
 
-for filename in ('ignition83_rules.csv', 'README.md', 'LICENSE', 'Scan83.ico'):
+for filename in ('ignition83_rules.csv', 'README.md', 'LICENSE'):
     source = os.path.join(SPECPATH, filename)
     destination = os.path.join(DISTPATH, filename)
     shutil.copy2(source, destination)
