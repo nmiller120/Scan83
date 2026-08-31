@@ -22,8 +22,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name='Scan83',
     debug=False,
     bootloader_ignore_signals=False,
@@ -36,21 +37,12 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='Scan83',
-)
 
-for filename in ('ignition83_rules.csv', 'README.md', 'LICENSE', 'ignition83_scan.py'):
+for filename in ('ignition83_rules.csv', 'README.md', 'LICENSE'):
     source = os.path.join(SPECPATH, filename)
-    destination = os.path.join(DISTPATH, 'Scan83', filename)
+    destination = os.path.join(DISTPATH, filename)
     shutil.copy2(source, destination)
 
 console_scripts_source = os.path.join(SPECPATH, 'console-scripts')
-console_scripts_destination = os.path.join(DISTPATH, 'Scan83', 'console-scripts')
+console_scripts_destination = os.path.join(DISTPATH, 'console-scripts')
 shutil.copytree(console_scripts_source, console_scripts_destination, dirs_exist_ok=True)
